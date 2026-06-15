@@ -1,0 +1,21 @@
+# Explicit, user-specified universe. No broad scanner in v1.
+# Per-symbol overrides win over the defaults in risk_limits.yaml / strategies.yaml.
+
+watchlist:
+  - symbol: AAPL
+    enabled: true
+    allow_short: false
+    # overrides:
+    #   max_position_pct: 8.0
+    #   ratchet_stop.trend_following.initial_stop_pct: 8.0
+
+  - symbol: MSFT
+    enabled: true
+    allow_short: false
+
+  - symbol: SPY
+    enabled: true
+    allow_short: false
+
+defaults:
+  allow_short: false        # longs-only until shorts are explicitly confirmed for v1

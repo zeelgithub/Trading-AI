@@ -1,0 +1,99 @@
+"""
+State store -- core layer.
+
+Persists the bot's managed positions (lifecycle + ratchet high-water state) to
+JSON so a restart -- or a separate scheduled run -- can rebuild the exact stop
+ladders and keep raising them. The broker remains the source of truth for what
+positions exist; this store remembers the bot's *intent state* around them.
+
+Boundary: places orders NO.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from src.common.models import Side
+from src.execution.order_manager import ManagedPosition, PositionStatus
+from src.risk.ratchet_stop import ratchet_from_state
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_PATH = PROJECT_ROOT / "state" / "positions.json"
+DEFAULT_HALT_PATH = PROJECT_ROOT / "state" / "halt.json"
+
+
+class HaltStore:
+    """Persists a HALT across cold runs so the bot does NOT self-resume between
+    separate scheduled invocations. Cleared only by an explicit manual reset."""
+
+    def __init__(self, path: str | Path = DEFAULT_HALT_PATH) -> None:
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    def is_halted(self) -> str | None:
+        if not self.path.exists():
+            return None
+        with self.path.open("r", encoding="utf-8") as fh:
+            return json.load(fh).get("reason", "halted")
+
+    def set(self, reason: str) -> None:
+        from datetime import datetime, timezone
+
+        with self.path.open("w", encoding="utf-8") as fh:
+            json.dump({"reason": reason, "ts": datetime.now(timezone.utc).isoformat()}, fh, indent=2)
+
+    def clear(self) -> None:
+        self.path.unlink(missing_ok=True)
+
+
+class StateStore:
+    def __init__(self, path: str | Path = DEFAULT_PATH) -> None:
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    def save(self, positions: dict[str, ManagedPosition]) -> None:
+        payload = {sym: self._to_dict(p) for sym, p in positions.items()}
+        with self.path.open("w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2, default=str)
+
+    def load(self) -> dict[str, ManagedPosition]:
+        if not self.path.exists():
+            return {}
+        with self.path.open("r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+        return {sym: self._from_dict(d) for sym, d in payload.items()}
+
+    @staticmethod
+    def _to_dict(p: ManagedPosition) -> dict:
+        return {
+            "symbol": p.symbol,
+            "side": p.side.value,
+            "qty": p.qty,
+            "strategy": p.strategy,
+            "entry_order_id": p.entry_order_id,
+            "stop_order_id": p.stop_order_id,
+            "current_stop": p.current_stop,
+            "status": p.status.value,
+            "filled_qty": p.filled_qty,
+            "tp_order_id": p.tp_order_id,
+            "take_profit": p.take_profit,
+            "ratchet": p.ratchet.state(),
+        }
+
+    @staticmethod
+    def _from_dict(d: dict) -> ManagedPosition:
+        return ManagedPosition(
+            symbol=d["symbol"],
+            side=Side(d["side"]),
+            qty=d["qty"],
+            strategy=d["strategy"],
+            entry_order_id=d["entry_order_id"],
+            stop_order_id=d["stop_order_id"],
+            current_stop=d["current_stop"],
+            ratchet=ratchet_from_state(d["ratchet"]),
+            status=PositionStatus(d.get("status", "open")),
+            filled_qty=d.get("filled_qty", 0.0),
+            tp_order_id=d.get("tp_order_id"),
+            take_profit=d.get("take_profit"),
+        )

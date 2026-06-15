@@ -1,0 +1,186 @@
+[
+  {
+    "politician": "Ro Khanna",
+    "ticker": "NVDA",
+    "asset_type": "stock",
+    "tx_type": "buy",
+    "trade_date": "2026-05-20",
+    "disclosure_date": "2026-06-05",
+    "amount_low": 1001,
+    "amount_high": 15000
+  },
+  {
+    "politician": "Ro Khanna",
+    "ticker": "AAPL",
+    "asset_type": "stock",
+    "tx_type": "sell",
+    "trade_date": "2026-05-22",
+    "disclosure_date": "2026-06-06",
+    "amount_low": 15001,
+    "amount_high": 50000
+  },
+  {
+    "politician": "Ro Khanna",
+    "ticker": "TSLA",
+    "asset_type": "option",
+    "tx_type": "buy",
+    "trade_date": "2026-05-25",
+    "disclosure_date": "2026-06-07"
+  },
+  {
+    "politician": "Ro Khanna",
+    "ticker": "MSFT",
+    "asset_type": "stock",
+    "tx_type": "buy",
+    "trade_date": "2026-01-02",
+    "disclosure_date": "2026-01-20"
+  },
+  {
+    "politician": "Nancy Pelosi",
+    "ticker": "GOOGL",
+    "asset_type": "stock",
+    "tx_type": "buy",
+    "trade_date": "2026-05-28",
+    "disclosure_date": "2026-06-08"
+  },
+  {
+    "politician": "Ro Khanna",
+    "ticker": "ISRG",
+    "asset_type": "stock",
+    "tx_type": "buy",
+    "trade_date": "2026-04-30",
+    "disclosure_date": "2026-06-11",
+    "amount_low": 1001,
+    "amount_high": 15000
+  },
+  {
+    "politician": "Ro Khanna",
+    "ticker": "JPM",
+    "asset_type": "stock",
+    "tx_type": "buy",
+    "trade_date": "2026-05-17",
+    "disclosure_date": "2026-06-11",
+    "amount_low": 1001,
+    "amount_high": 15000
+  },
+  {
+    "politician": "Ro Khanna",
+    "ticker": "ALLY",
+    "asset_type": "stock",
+    "tx_type": "buy",
+    "trade_date": "2026-05-14",
+    "disclosure_date": "2026-06-11",
+    "amount_low": 1001,
+    "amount_high": 15000
+  },
+  {
+    "politician": "Ro Khanna",
+    "ticker": "COF",
+    "asset_type": "stock",
+    "tx_type": "buy",
+    "trade_date": "2026-04-30",
+    "disclosure_date": "2026-06-11",
+    "amount_low": 1001,
+    "amount_high": 15000
+  },
+  {
+    "politician": "Ro Khanna",
+    "ticker": "GOOGL",
+    "asset_type": "stock",
+    "tx_type": "buy",
+    "trade_date": "2026-04-30",
+    "disclosure_date": "2026-06-11",
+    "amount_low": 1001,
+    "amount_high": 15000
+  },
+  {
+    "politician": "Ro Khanna",
+    "ticker": "MS",
+    "asset_type": "stock",
+    "tx_type": "buy",
+    "trade_date": "2026-04-30",
+    "disclosure_date": "2026-06-11",
+    "amount_low": 1001,
+    "amount_high": 15000
+  },
+  {
+    "politician": "Ro Khanna",
+    "ticker": "AMZN",
+    "asset_type": "stock",
+    "tx_type": "buy",
+    "trade_date": "2026-04-30",
+    "disclosure_date": "2026-06-11",
+    "amount_low": 1001,
+    "amount_high": 15000
+  },
+  {
+    "politician": "Ro Khanna",
+    "ticker": "URI",
+    "asset_type": "stock",
+    "tx_type": "sell",
+    "trade_date": "2026-04-30",
+    "disclosure_date": "2026-06-11",
+    "amount_low": 1001,
+    "amount_high": 15000
+  },
+  {
+    "politician": "Ro Khanna",
+    "ticker": "AMT",
+    "asset_type": "stock",
+    "tx_type": "sell",
+    "trade_date": "2026-04-30",
+    "disclosure_date": "2026-06-11",
+    "amount_low": 1001,
+    "amount_high": 15000
+  },
+  {
+    "politician": "Ro Khanna",
+    "ticker": "JNJ",
+    "asset_type": "stock",
+    "tx_type": "sell",
+    "trade_date": "2026-04-30",
+    "disclosure_date": "2026-06-11",
+    "amount_low": 1001,
+    "amount_high": 15000
+  },
+  {
+    "politician": "Ro Khanna",
+    "ticker": "NVDA",
+    "asset_type": "stock",
+    "tx_type": "sell",
+    "trade_date": "2026-04-30",
+    "disclosure_date": "2026-06-11",
+    "amount_low": 1001,
+    "amount_high": 15000
+  },
+  {
+    "politician": "Ro Khanna",
+    "ticker": "MCHP",
+    "asset_type": "stock",
+    "tx_type": "sell",
+    "trade_date": "2026-04-30",
+    "disclosure_date": "2026-06-11",
+    "amount_low": 1001,
+    "amount_high": 15000
+  },
+  {
+    "politician": "Ro Khanna",
+    "ticker": "AMRZ",
+    "asset_type": "stock",
+    "tx_type": "buy",
+    "trade_date": "2026-05-20",
+    "disclosure_date": "2026-06-11",
+    "amount_low": 1001,
+    "amount_high": 15000
+  },
+  {
+    "politician": "Ro Khanna",
+    "ticker": "LGF.A",
+    "asset_type": "stock",
+    "tx_type": "sell",
+    "trade_date": "2026-05-13",
+    "disclosure_date": "2026-06-11",
+    "amount_low": 1001,
+    "amount_high": 15000
+  }
+]

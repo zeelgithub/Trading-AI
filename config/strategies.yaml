@@ -1,0 +1,78 @@
+# Strategy definitions. Each symbol is routed to exactly ONE strategy by the
+# regime filter, so trend and mean-reversion never fight. Timeframe: daily.
+
+regime_filter:
+  enabled: true
+  adx_period: 14
+  trending_adx_min: 25       # ADX > 25 => trending
+  ranging_adx_max: 20        # ADX < 20 => ranging  (20-25 = dead zone, stand aside)
+  ema_fast: 50
+  ema_slow: 200
+  routing:
+    trending: trend_following
+    ranging: mean_reversion
+    expansion: breakout       # ATR rising + range break on volume
+
+strategies:
+
+  trend_following:
+    enabled: true
+    direction: [long, short]
+    indicators:
+      ema: [20, 50, 200]
+      rsi_period: 14
+      volume_ma_period: 20
+    conditions:
+      long_bias: "price > ema50 and price > ema200"
+      short_bias: "price < ema50 and price < ema200"
+      rsi_long_band: [40, 70]
+      rsi_short_band: [30, 60]
+      min_volume_vs_ma: 1.0
+    entry:
+      long: "pullback to ema20 + bullish confirmation candle"
+      short: "rejection from ema20 + bearish confirmation candle"
+    exit: "opposite EMA break OR ratchet stop"
+
+  mean_reversion:
+    enabled: true
+    direction: [long, short]
+    indicators:
+      bollinger_period: 20      # replaces VWAP (intraday-only) on daily bars
+      bollinger_std: 2.0
+      rsi_period: 14
+    conditions:
+      long_setup: "price <= lower_band and rsi < 30"
+      short_setup: "price >= upper_band and rsi > 70"
+    entry:
+      long: "oversold + bullish confirmation candle"
+      short: "overbought + bearish rejection candle"
+    exit: "revert to mean (SMA20) OR +2% target; hard 2% stop"
+
+  breakout:
+    enabled: true
+    direction: [long, short]
+    indicators:
+      sr_lookback: 20           # 'recent' support/resistance window (TBD-confirm)
+      volume_ma_period: 20
+      atr_period: 14
+    conditions:
+      breakout: "close beyond recent S/R level"
+      min_volume_spike: 1.5     # >= 1.5x average
+      volatility: "atr increasing"
+    entry: "breakout confirmation candle close"
+    exit: "ATR-based ratchet stop"
+
+# Non-executing sentiment gate. NEVER triggers a trade — only gates/sizes.
+sentiment_gate:
+  enabled: true
+  scores: [-1, 0, 1]            # -1 bearish, 0 neutral, +1 bullish
+  rules:
+    long_requires_min: 0        # longs require sentiment >= 0
+    short_requires_max: 0       # shorts require sentiment <= 0
+    conflict_action: reduce_confidence
+  on_feed_unavailable: skip_gate # fail-safe behavior when news/LLM is down (TBD-confirm)
+
+# Open definitions still to pin down before coding each strategy:
+#   - precise "confirmation candle" / "rejection candle" rules
+#   - exact "recent" S/R detection for breakout
+#   - shorts in v1 vs longs-only first

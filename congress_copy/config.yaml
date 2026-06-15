@@ -1,0 +1,16 @@
+# Congress copy-trading config.
+
+# Whose disclosures to mirror. One-line knob -- change and re-run.
+# (Default: Ro Khanna -- the most active equities trader, max signal for v1.
+#  Switch to "Nancy Pelosi" once options support exists for the real alpha.)
+politician: "Ro Khanna"
+
+equities_only: true            # skip option disclosures (bot is equities-only)
+max_disclosure_age_days: 60    # ignore disclosures older than this (lag reality)
+initial_stop_pct: 10.0         # protective stop attached to each mirrored buy
+strategy_name: "congress_copy"
+
+execute: false                 # SHADOW: decide + log only, place no orders
+
+data_file: "congress_copy/data/disclosures.json"   # written by the ingestion job
+seen_file: "congress_copy/state/seen.json"

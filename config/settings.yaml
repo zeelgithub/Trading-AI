@@ -1,0 +1,31 @@
+# General system settings (non-secret). Secrets live in .env only.
+
+mode: paper                # paper | live  (live is a deliberate manual change)
+
+market:
+  timezone: America/New_York
+  session: regular         # regular | extended
+  calendar: us_equities
+
+data:
+  timeframe: 1Day          # primary bar interval for all strategies (swing)
+  feed: iex                # iex | sip  (sip = full volume, paid)
+  lookback_days: 400       # enough history for the 200-day EMA + warmup
+  stale_seconds: 90        # quote older than this => treated as disconnected
+
+universe:
+  source: config/symbols.yaml   # explicit, user-specified watchlist (no scanner in v1)
+
+scheduling:
+  # Daily/swing system: evaluate once near the close, act at next open.
+  evaluate_at: "15:45"     # ET, just before close
+  reconcile_interval_seconds: 300
+
+logging:
+  level: INFO
+  audit_log: logs/audit.jsonl     # append-only decision + order trail
+  trade_log: logs/trades.jsonl
+
+alerts:
+  enabled: true
+  on: [halt, kill_switch, reconciliation_mismatch, fill, daily_summary]

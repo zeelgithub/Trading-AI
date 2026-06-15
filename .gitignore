@@ -1,0 +1,45 @@
+# Secrets — NEVER commit
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+secrets/
+
+# Local data lake, logs, persisted state
+data/raw/*
+data/processed/*
+*.db
+*.sqlite
+*.sqlite3
+logs/*
+state/*
+!**/.gitkeep
+
+# Trading-research MCP server cache
+mcp_servers/trading_research/.cache/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Claude Code local config (not part of the project)
+.claude/
+
+# congress copy runtime state
+congress_copy/state/*
+!congress_copy/state/.gitkeep

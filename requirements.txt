@@ -1,0 +1,28 @@
+# Pinned at integration time. Listed here as the intended dependency set.
+# Install into a virtualenv: python -m venv .venv
+
+# Broker / market data
+alpaca-py>=0.20
+
+# Data & indicators
+pandas>=2.0
+numpy>=1.26
+pandas-ta>=0.3.14b        # EMA, RSI, ATR, ADX, Bollinger Bands
+
+# Config & env
+PyYAML>=6.0
+python-dotenv>=1.0
+pydantic>=2.0             # typed config / message models
+
+# Storage
+# (stdlib sqlite3 for v1; consider duckdb later)
+
+# Tooling
+pytest>=8.0
+ruff>=0.4
+mypy>=1.10
+
+# Trading-research MCP server (mcp_servers/trading_research)
+requests>=2.31
+mcp>=1.2
+anthropic>=0.40

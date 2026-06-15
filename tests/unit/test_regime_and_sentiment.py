@@ -1,0 +1,72 @@
+"""Tests for the regime filter routing and the non-executing sentiment gate."""
+
+from __future__ import annotations
+
+from src.common.config import load_config
+from src.common.models import Action, Intent, Regime, Side
+from src.strategy.regime_filter import RegimeFilter
+from src.strategy.sentiment_gate import SentimentGate
+from tests.unit.synth import flat_frame
+
+
+# --- Regime filter ---
+
+def test_trending_routes_to_trend_following():
+    rf = RegimeFilter(load_config())
+    df = flat_frame(30, value=100.0, adx=30.0)
+    assert rf.classify(df) == Regime.TRENDING
+    assert rf.active_strategy(df) == "trend_following"
+
+
+def test_ranging_routes_to_mean_reversion():
+    rf = RegimeFilter(load_config())
+    df = flat_frame(30, value=100.0, adx=15.0)
+    assert rf.classify(df) == Regime.RANGING
+    assert rf.active_strategy(df) == "mean_reversion"
+
+
+def test_expansion_routes_to_breakout():
+    rf = RegimeFilter(load_config())
+    # Rising ATR + close breaking the prior-range high -> expansion.
+    df = flat_frame(30, value=100.0, close=110.0, atr=5.0, adx=22.0)
+    assert rf.classify(df) == Regime.EXPANSION
+    assert rf.active_strategy(df) == "breakout"
+
+
+def test_dead_zone_stands_aside():
+    rf = RegimeFilter(load_config())
+    df = flat_frame(30, value=100.0, adx=22.0)  # 20<adx<25, no breakout
+    assert rf.classify(df) == Regime.NONE
+    assert rf.active_strategy(df) is None
+
+
+# --- Sentiment gate ---
+
+def _long_intent(conf=0.7) -> Intent:
+    return Intent(symbol="AAPL", strategy="trend_following", side=Side.LONG,
+                  action=Action.BUY, confidence=conf)
+
+
+def test_neutral_sentiment_haircuts_confidence():
+    gate = SentimentGate(load_config(), scorer=None)  # all neutral (0)
+    out = gate.apply(_long_intent(0.7))
+    assert out is not None
+    assert out.confidence == 0.56  # 0.7 * 0.8
+
+
+def test_confirming_sentiment_keeps_confidence():
+    gate = SentimentGate(load_config(), scorer=lambda s: 1)
+    out = gate.apply(_long_intent(0.7))
+    assert out is not None and out.confidence == 0.7
+
+
+def test_opposing_sentiment_blocks_long():
+    gate = SentimentGate(load_config(), scorer=lambda s: -1)
+    assert gate.apply(_long_intent()) is None
+
+
+def test_short_blocked_by_bullish_sentiment():
+    gate = SentimentGate(load_config(), scorer=lambda s: 1)
+    short = Intent(symbol="AAPL", strategy="breakout", side=Side.SHORT,
+                   action=Action.SHORT, confidence=0.6)
+    assert gate.apply(short) is None

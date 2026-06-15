@@ -1,0 +1,57 @@
+# Risk limits — the deterministic guardrails. The Risk Gatekeeper enforces these
+# and has absolute veto power. Profile: MODERATE. All values tunable in paper.
+
+account:
+  # Hard kill switch: realized + unrealized loss vs start-of-day equity.
+  max_daily_loss_pct: 4.0
+  max_gross_exposure_pct: 175.0     # sum of |positions| vs equity (intraday margin up to 4x)
+  max_open_positions: 10
+
+position:
+  max_position_pct: 10.0            # max single position vs equity
+  max_per_symbol_pct: 10.0
+  per_trade_risk_pct: 1.0          # equity risked per trade (drives position sizing)
+
+allocation:
+  # Equal risk budget across the three strategies (~1/3 of daily risk each).
+  scheme: equal_risk
+  per_strategy_risk_pct: 1.33
+
+circuit_breakers:
+  max_orders_per_minute: 10        # runaway-loop guard
+  max_orders_per_day: 50
+  max_consecutive_errors: 5        # then HALT
+  fat_finger_price_band_pct: 20.0  # reject orders priced >20% off last quote
+  require_manual_reset_after_kill: true   # bot does NOT self-resume after a kill
+
+pdt:
+  # Account funded above $25k => standard rules, but still tracked.
+  enforce: true
+  min_equity_for_daytrading: 25000
+  max_day_trades_rolling_5d: 3     # only enforced if equity dips below threshold
+
+connectivity:
+  heartbeat_interval_seconds: 30
+  on_disconnect: halt_new_trades   # never trade on stale data
+  retry_backoff_seconds: [1, 2, 5, 15, 30]
+  retry_hard_cap: 5                # then HALT
+
+# Universal ratchet-stop exit engine — parameters are PER STRATEGY.
+# See docs/STRATEGIES.md. Mean-reversion MUST stay tight (small target).
+ratchet_stop:
+  trend_following:
+    initial_stop_pct: 10.0
+    lock_trigger_pct: 20.0
+    profit_lock_pct: 10.0
+    step_pct: 20.0
+  mean_reversion:
+    initial_stop_pct: 2.0
+    profit_target_pct: 2.0         # exits at target / mean; tight stop, ~1:1 R:R
+  breakout:
+    atr_multiple_initial: 2.0
+    atr_multiple_trail: 1.5
+
+# Hybrid execution: the current stop always rests as a real order at the broker.
+backstop:
+  enabled: true
+  catastrophe_stop_pct: 15.0       # wide broker-side stop in case bot dies
