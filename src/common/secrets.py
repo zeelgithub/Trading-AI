@@ -63,6 +63,29 @@ class TradingCredentials:
     base_url: str
 
 
+@dataclass(frozen=True)
+class NotificationCredentials:
+    """Telegram bot credentials for the notify layer. NOT trading creds: a
+    holder of these can message you, never place an order. The token is
+    repr-suppressed so it can't leak into logs."""
+
+    bot_token: str = field(repr=False)
+    allowed_chat_ids: tuple[int, ...] = ()
+    api_base_url: str = "https://api.telegram.org"
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.bot_token)
+
+    def is_allowed(self, chat_id: int | str) -> bool:
+        """True if this chat/user id may command the bot. An empty allowlist
+        denies everyone -- you must explicitly list your own id."""
+        try:
+            return int(chat_id) in self.allowed_chat_ids
+        except (TypeError, ValueError):
+            return False
+
+
 def load_market_data_credentials() -> MarketDataCredentials:
     _ensure_env_loaded()
     return MarketDataCredentials(
@@ -71,6 +94,41 @@ def load_market_data_credentials() -> MarketDataCredentials:
         base_url=os.environ.get("ALPACA_DATA_BASE_URL", "https://data.alpaca.markets"),
         feed=os.environ.get("ALPACA_DATA_FEED", "iex"),
     )
+
+
+def _parse_chat_ids(raw: str | None) -> tuple[int, ...]:
+    if not raw:
+        return ()
+    ids: list[int] = []
+    for part in raw.replace(";", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            ids.append(int(part))
+        except ValueError:
+            continue  # ignore malformed entries rather than crash the listener
+    return tuple(ids)
+
+
+def load_notification_credentials() -> NotificationCredentials:
+    """Telegram bot token + allowed chat-id allowlist. Returns an unconfigured
+    (empty-token) object if not set, so callers can no-op cleanly. Holds NO
+    trading credentials."""
+    _ensure_env_loaded()
+    return NotificationCredentials(
+        bot_token=os.environ.get("TELEGRAM_BOT_TOKEN", ""),
+        allowed_chat_ids=_parse_chat_ids(os.environ.get("TELEGRAM_ALLOWED_CHAT_IDS")),
+        api_base_url=os.environ.get("TELEGRAM_API_BASE_URL", "https://api.telegram.org"),
+    )
+
+
+def load_anthropic_api_key() -> str:
+    """Claude API key for the cognitive-plane agents and research summarizers.
+    This is an AI credential, NOT a trading credential -- a holder of it can
+    reason and summarize, never place an order."""
+    _ensure_env_loaded()
+    return _require("ANTHROPIC_API_KEY")
 
 
 def load_trading_credentials() -> TradingCredentials:

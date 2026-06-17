@@ -8,6 +8,7 @@ alpaca-py>=0.20
 pandas>=2.0
 numpy>=1.26
 pandas-ta>=0.3.14b        # EMA, RSI, ATR, ADX, Bollinger Bands
+yfinance>=0.2.40         # free, coarse fundamentals for discovery (Phase C; optional)
 
 # Config & env
 PyYAML>=6.0
@@ -26,3 +27,7 @@ mypy>=1.10
 requests>=2.31
 mcp>=1.2
 anthropic>=0.40
+
+# Optional: voice messages in Telegram (transcription runs locally, no API key)
+# Uncomment and install to enable; also install ffmpeg and add it to PATH.
+# openai-whisper>=20231117

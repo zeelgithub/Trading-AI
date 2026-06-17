@@ -142,6 +142,11 @@ class Notifier:
         buttons = [[("✅ Approve", f"approve:{proposal.id}"), ("❌ Deny", f"deny:{proposal.id}")]]
         self._broadcast(text, buttons)
 
+    def send(self, text: str, buttons: Keyboard | None = None) -> None:
+        """Push a free-form message (used by the discovery digest). Best-effort,
+        not event-filtered."""
+        self._broadcast(text, buttons)
+
 
 class NullNotifier:
     """No-op notifier used when Telegram is unconfigured or in tests."""
@@ -152,6 +157,9 @@ class NullNotifier:
         return None
 
     def proposal(self, proposal) -> None:
+        return None
+
+    def send(self, text: str, buttons=None) -> None:
         return None
 
 

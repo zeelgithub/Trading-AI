@@ -68,3 +68,23 @@ def test_unknown_broker_position_flagged():
     report = Reconciler(broker).reconcile({})
     assert not report.ok
     assert report.unknown_positions == ["TSLA"]
+
+
+def test_stop_fired_is_auto_closed_not_halted():
+    """Stop fires at broker: position + stop order both gone. Should be auto_closed,
+    not a halt-triggering quantity_mismatch."""
+    broker = FakeBroker(auto_fill=False)  # no position, no orders
+    report = Reconciler(broker).reconcile({"AAPL": pos("AAPL", PositionStatus.OPEN)})
+    assert report.ok                          # must NOT halt
+    assert "AAPL" in report.auto_closed
+    assert "AAPL" not in report.quantity_mismatches
+
+
+def test_open_with_order_but_no_position_is_mismatch():
+    """Position gone but an order still exists — genuinely unexpected broker state."""
+    broker = FakeBroker(auto_fill=False)
+    broker.seed_order(stop_order("AAPL"))    # order exists, but no position
+    report = Reconciler(broker).reconcile({"AAPL": pos("AAPL", PositionStatus.OPEN)})
+    assert not report.ok
+    assert "AAPL" in report.quantity_mismatches
+    assert "AAPL" not in report.auto_closed

@@ -48,6 +48,11 @@ def _coid(symbol: str, strategy: str, tag: str, kind: str) -> str:
     return f"{symbol}-{strategy}-{tag}-{kind}"
 
 
+def realized_pnl(side: Side, entry: float, qty: float, exit_price: float) -> float:
+    """Signed PnL of closing `qty` shares at `exit_price` from `entry`."""
+    return (exit_price - entry) * qty if side == Side.LONG else (entry - exit_price) * qty
+
+
 class OrderManager:
     def __init__(self, broker: BrokerInterface) -> None:
         self.broker = broker

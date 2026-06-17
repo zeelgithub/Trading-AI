@@ -28,11 +28,15 @@ import pandas as pd
 from src.common.config import Config, load_config
 from src.common.logging import AuditLog, get_logger
 from src.common.models import Decision, Side
+from src.core.proposals import Proposal
+from src.core.rotation import RotationState, RotationStateStore
 from src.core.state_machine import State, StateMachine
-from src.core.state_store import HaltStore, StateStore
+from src.core.state_store import HaltClass, HaltStore, StateStore
 from src.execution.broker_alpaca import BrokerInterface
-from src.execution.order_manager import OrderManager, PositionStatus
+from src.notify.telegram import NullNotifier
+from src.execution.order_manager import OrderManager, PositionStatus, realized_pnl
 from src.execution.reconciler import Reconciler
+from src.research.scoreboard import Scoreboard
 from src.risk.ratchet_stop import build_ratchet
 from src.risk.risk_manager import AccountState, RiskManager
 from src.strategy.breakout import Breakout
@@ -53,6 +57,8 @@ class CycleReport:
     halt_reason: str | None = None
     stops_raised: list = field(default_factory=list)   # (symbol, new_stop)
     opened: list = field(default_factory=list)         # symbols
+    proposed: list = field(default_factory=list)        # symbols (propose mode)
+    proposals: list = field(default_factory=list)       # Proposal objects (propose mode)
     exited: list = field(default_factory=list)          # (symbol, reason)
     decisions: list = field(default_factory=list)       # (symbol, decision, qty)
     skipped: list = field(default_factory=list)         # (symbol, why)
@@ -62,7 +68,8 @@ class CycleReport:
             return f"HALTED: {self.halt_reason}"
         return (
             f"state={self.state} executed={self.executed} raised={len(self.stops_raised)} "
-            f"opened={len(self.opened)} exited={len(self.exited)} decisions={len(self.decisions)}"
+            f"opened={len(self.opened)} proposed={len(self.proposed)} "
+            f"exited={len(self.exited)} decisions={len(self.decisions)}"
         )
 
 
@@ -74,15 +81,23 @@ class Orchestrator:
         feature_provider: FeatureProvider | None = None,
         execute: bool = False,
         allow_live: bool = False,
+        propose: bool = False,
         scorer: Callable[[str], int] | None = None,
         state_store: StateStore | None = None,
         halt_store: HaltStore | None = None,
         audit: AuditLog | None = None,
+        notifier=None,
+        rotation_store: RotationStateStore | None = None,
+        scoreboard: Scoreboard | None = None,
     ) -> None:
         self.config = config or load_config()
         self.broker = broker
-        self.execute = execute
+        # propose mode decides and emits proposals but places NOTHING (the human
+        # approves later from the phone); it is mutually exclusive with execute.
+        self.propose = propose
+        self.execute = execute and not propose
         self.allow_live = allow_live
+        self.notifier = notifier or NullNotifier()
         self.feature_provider = feature_provider or self._default_feature_provider()
 
         self.regime = RegimeFilter(self.config)
@@ -101,6 +116,13 @@ class Orchestrator:
         self.audit = audit or AuditLog()
         self.log = get_logger("orchestrator")
         self.positions = self.store.load()
+        # Applied strategy rotation (propose-only; default = all enabled, so this
+        # is a no-op until a rotation has been approved). Read each cycle so an
+        # approval between runs takes effect without a restart.
+        self.rotation_store = rotation_store or RotationStateStore()
+        # Live per-strategy attribution: realized PnL of real closes feeds the
+        # scoreboard, so its "live" columns reflect reality, not just backtests.
+        self.scoreboard = scoreboard or Scoreboard()
 
         # A HALT persisted by a prior (cold) run blocks trading until manual reset.
         persisted_halt = self.halt_store.is_halted()
@@ -118,7 +140,8 @@ class Orchestrator:
             return report
 
         if self.config.is_live and self.execute and not self.allow_live:
-            self._halt(report, "live execution requested without allow_live=True")
+            self._halt(report, "live execution requested without allow_live=True",
+                       HaltClass.CONFIG)
             return report
 
         try:
@@ -131,9 +154,21 @@ class Orchestrator:
 
             # 1. Reconcile -- broker is source of truth (pending-aware).
             rec = self.reconciler.reconcile(self.positions)
+            # Sync positions closed at broker (stop fired / external close) so they
+            # don't trigger a halt-level mismatch on the next check.
+            for sym in rec.auto_closed:
+                if sym in self.positions:
+                    if self.execute:  # stop fired / external close -> stop level is the exit proxy
+                        self._record_attribution(self.positions[sym], self.positions[sym].current_stop)
+                    self.positions[sym].status = PositionStatus.CLOSED
+                    self.audit.record("auto_closed", symbol=sym,
+                                      detail="position gone from broker (stop fired or external close)")
+                    self._notify("fill", f"{sym} closed at broker (stop fired or external close)")
+                    self.log.info("auto-closed %s: gone from broker", sym)
             if not rec.ok:
                 self.audit.record("reconcile_mismatch", detail=rec.summary())
-                self._halt(report, f"reconcile mismatch: {rec.summary()}")
+                self._halt(report, f"reconcile mismatch: {rec.summary()}",
+                           HaltClass.RECONCILE_MISMATCH)
                 return report
             report.reconciled = True
 
@@ -143,7 +178,7 @@ class Orchestrator:
                 self.audit.record("kill_switch", detail=ks.reason)
                 if self.execute:
                     self._flatten()
-                self._halt(report, f"kill switch: {ks.reason}")
+                self._halt(report, f"kill switch: {ks.reason}", HaltClass.KILL_SWITCH)
                 return report
 
             market_open = self.broker.is_market_open()
@@ -188,7 +223,7 @@ class Orchestrator:
                     self.store.save(self.positions)
                 except Exception:  # pragma: no cover - best-effort persist
                     pass
-            self._halt(report, f"cycle exception: {exc}")
+            self._halt(report, f"cycle exception: {exc}", HaltClass.EXCEPTION)
             return report
 
     def reset(self) -> None:
@@ -218,6 +253,7 @@ class Orchestrator:
             self.audit.record("signal_exit", symbol=symbol, reason=reason)
             if self.execute:
                 self.order_manager.close(pos, reason)
+                self._record_attribution(pos, float(feats.iloc[-1].close))
                 del self.positions[symbol]
 
     def _raise_stops(self, report: CycleReport) -> None:
@@ -248,6 +284,9 @@ class Orchestrator:
         if active is None:
             report.skipped.append((symbol, "no regime"))
             return
+        if not self.rotation_store.load().is_enabled(active):
+            report.skipped.append((symbol, f"{active} disabled by rotation"))
+            return
         intent = self.strategies[active].generate(symbol, feats)
         if intent is None:
             report.skipped.append((symbol, "no setup"))
@@ -277,7 +316,9 @@ class Orchestrator:
         )
 
         if decision.decision in (Decision.APPROVE, Decision.RESIZE) and decision.approved_qty > 0:
-            if self.execute:
+            if self.propose:
+                self._propose(decision, gated, feats, report)
+            elif self.execute:
                 self._open(decision, gated, feats, report)
             else:
                 report.opened.append(symbol)  # would open (shadow)
@@ -293,16 +334,64 @@ class Orchestrator:
         self.positions[pos.symbol] = pos
         report.opened.append(pos.symbol)
         self.audit.record("position_opened", symbol=pos.symbol, qty=pos.qty, stop=pos.current_stop)
+        self._notify("fill", f"BUY {pos.qty:g} {pos.symbol} @ ~${entry:,.2f}, stop ${pos.current_stop:,.2f}")
+
+    def _propose(self, decision, intent, feats, report: CycleReport) -> None:
+        """Propose-and-approve: record a risk-approved entry as a Proposal and
+        emit it (no order placed). The human approves later from the phone."""
+        ratchet_params = self.config.risk_limits.get("ratchet_stop", {}).get(intent.strategy, {})
+        entry = intent.entry_price or float(feats.iloc[-1].close)
+        atr = float(feats.iloc[-1].atr) if "atr_multiple_initial" in ratchet_params else None
+        ratchet = build_ratchet(intent.strategy, ratchet_params, entry, intent.side, atr=atr)
+        wire = intent.to_dict()
+        wire["entry_price"] = round(entry, 2)
+        wire["stop_loss"] = round(ratchet.stop, 2)
+        proposal = Proposal.create(
+            intent=wire,
+            approved_qty=decision.approved_qty,
+            strategy=intent.strategy,
+            ratchet_params=ratchet_params,
+            atr=atr,
+            expiry_minutes=int(self.config.get("settings.approval.proposal_expiry_minutes", 1080)),
+        )
+        report.proposals.append(proposal)
+        report.proposed.append(proposal.symbol)
+        self.audit.record("proposal_created", symbol=proposal.symbol,
+                          qty=decision.approved_qty, stop=round(ratchet.stop, 2))
 
     # --- helpers ---
-    def _halt(self, report: CycleReport, reason: str) -> None:
+    def _notify(self, event: str, detail: str = "") -> None:
+        """Best-effort alert to the phone. Never let a notify failure affect a
+        trading cycle."""
+        try:
+            self.notifier.alert(event, detail)
+        except Exception as exc:  # pragma: no cover - defensive
+            self.log.warning("notify failed (%s): %s", event, exc)
+
+    def _record_attribution(self, pos, exit_price: float) -> None:
+        """Record a real close's realized PnL against its strategy on the
+        scoreboard. Best-effort: attribution must NEVER affect a trading cycle.
+        `exit_price` is a proxy (latest close / stop level), good enough for
+        relative strategy ranking, not broker-exact accounting."""
+        try:
+            entry = float(getattr(pos.ratchet, "entry", 0.0))
+            qty = pos.filled_qty or pos.qty
+            if not entry or not qty:
+                return
+            self.scoreboard.record_live_trade(pos.strategy, round(realized_pnl(pos.side, entry, qty, exit_price), 2))
+        except Exception as exc:  # pragma: no cover - defensive
+            self.log.warning("attribution record failed for %s: %s", pos.symbol, exc)
+
+    def _halt(self, report: CycleReport, reason: str,
+              halt_class: str = HaltClass.UNKNOWN) -> None:
         self.state.halt(reason)
-        self.halt_store.set(reason)  # persist across cold runs -> no self-resume
+        self.halt_store.set(reason, halt_class)  # persist across cold runs -> no self-resume
         report.halted = True
         report.halt_reason = reason
         report.reconciled = "reconcile" not in reason
         report.state = self.state.state.value
         self.log.error("HALT: %s", reason)
+        self._notify("halt", reason)
 
     def _flatten(self) -> None:
         for symbol, pos in list(self.positions.items()):

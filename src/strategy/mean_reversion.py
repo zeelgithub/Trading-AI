@@ -41,6 +41,19 @@ class MeanReversion(Strategy):
 
         return None
 
+    def should_exit(self, symbol: str, features, side: Side) -> str | None:
+        """Exit when price crosses back to the BB mid (20-day SMA) — the 'revert
+        to mean' leg documented in strategies.yaml. The +2% take-profit is handled
+        separately by the broker OCO order."""
+        last = features.iloc[-1]
+        if has_nan(last, ["bb_mid"]):
+            return None
+        if side == Side.LONG and last.close >= last.bb_mid:
+            return "mean_reverted_to_mid"
+        if side == Side.SHORT and last.close <= last.bb_mid:
+            return "mean_reverted_to_mid"
+        return None
+
     def _intent(self, symbol: str, side: Side, entry: float) -> Intent:
         target_pct = float(self.ratchet_params.get("profit_target_pct", 2.0)) / 100.0
         if side == Side.LONG:

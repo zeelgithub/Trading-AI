@@ -32,10 +32,30 @@ a great strategy with no controls eventually does not. Config:
 
 ## Tier 4 — Human-in-the-loop / observability
 
-- **Alerts** on halts, fills, reconciliation mismatch, daily summary.
+- **Alerts** on halts, fills, reconciliation mismatch, daily summary — pushed to
+  the phone over Telegram (`src/notify/`).
+- **Propose-and-approve** (`approval.require_approval: true`, default): the daily
+  cycle decides but places **nothing**; each risk-approved entry is pushed to the
+  phone with Approve / Deny and only reaches the broker on approval. `--execute`
+  is converted to propose while this is on.
 - **Mandatory manual reset** after a kill-switch trip — the bot does not self-resume.
 - **Paper/dry-run default**; live trading is an explicit flag.
 - **Append-only audit trail**: every signal -> risk verdict -> order -> fill is logged.
+
+### Phone control (Telegram) — auth & boundaries
+- The Telegram token is a **notification** credential (`load_notification_credentials`),
+  never a trading credential. `src/notify/` holds the token only and never calls
+  the broker; phone commands route through `src/core/trade_service`, which runs
+  every order through the **risk gate** before execution.
+- **Chat-ID allowlist** (`TELEGRAM_ALLOWED_CHAT_IDS`) is enforced on every
+  update; an empty allowlist denies everyone. An un-allowlisted `/start` only
+  ever reveals the caller's chat id (for setup), nothing else.
+- **Approve, /buy, /flatten** require a confirm tap (anti-fat-finger). Every
+  order path **refuses while HALTED** (default-to-halt). Phone orders are
+  **paper-only** in v1 — live still needs `mode: live` + the explicit flag.
+- A proposal **expires** after `approval.proposal_expiry_minutes` so a stale
+  idea can't be approved into a moved market; approval **re-runs the risk gate**
+  with fresh account state.
 
 ## Hybrid stop execution
 

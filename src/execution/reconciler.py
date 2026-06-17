@@ -32,11 +32,14 @@ class ReconcileReport:
     unknown_positions: list[str] = field(default_factory=list)
     unprotected_positions: list[str] = field(default_factory=list)
     pending_lost: list[str] = field(default_factory=list)
+    auto_closed: list[str] = field(default_factory=list)  # stop fired / closed at broker
 
     def summary(self) -> str:
-        if self.ok:
-            return "reconciled: internal state matches broker"
         parts = []
+        if self.auto_closed:
+            parts.append(f"auto-closed (stop fired): {self.auto_closed}")
+        if self.ok and not parts:
+            return "reconciled: internal state matches broker"
         if self.quantity_mismatches:
             parts.append(f"qty mismatch: {self.quantity_mismatches}")
         if self.unknown_positions:
@@ -77,7 +80,15 @@ class Reconciler:
             # OPEN / PENDING_EXIT -> must be a real, protected broker position.
             bp = broker_positions.get(symbol)
             if bp is None:
-                report.quantity_mismatches.append(symbol)
+                # Position is gone from broker. If there is also no open order,
+                # the protective stop (or a manual close) fired and filled — that
+                # is expected and should not halt the bot. Only flag as a true
+                # mismatch when an order exists but the position has vanished
+                # (genuinely unexpected broker state).
+                if symbol in order_symbols:
+                    report.quantity_mismatches.append(symbol)
+                else:
+                    report.auto_closed.append(symbol)
                 continue
             expected_qty = pos.filled_qty or pos.qty
             if abs(bp.qty - expected_qty) > QTY_TOLERANCE:
@@ -95,6 +106,7 @@ class Reconciler:
             or report.unknown_positions
             or report.unprotected_positions
             or report.pending_lost
+            # auto_closed is expected (stop fired) — does not block the cycle
         )
         return report
 

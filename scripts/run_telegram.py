@@ -12,8 +12,9 @@ the bot from your phone:
     /halt  /reset            stop everything / clear a HALT
     /run                     run a decision cycle now and push fresh proposals
 
-    Natural language: just type what you want (ANTHROPIC_API_KEY must be in .env)
-      e.g. "buy 15 Tesla with 8% stop"  ·  "show my positions"  ·  "halt"
+    Natural language: just type what you want -- parsed by the nl_router agent
+      when ANTHROPIC_API_KEY is set, else a local regex parser (graceful fallback)
+      e.g. "grab 15 Tesla, tight 8% stop"  ·  "how's my book?"  ·  "stop everything"
 
     Voice messages: send a voice message; transcribed locally with openai-whisper
       (pip install openai-whisper  -- also needs ffmpeg on PATH)
@@ -30,8 +31,17 @@ from __future__ import annotations
 
 import time
 
+from src.agents.nl import NLCommandParser
 from src.common.config import load_config
 from src.common.logging import get_logger
+from src.core.portfolio_view import positions_snapshot, scoreboard_snapshot
+from src.core.rotation import RotationService
+from src.data.queries import indicator_snapshot
+from src.discovery.builder import build_discovery_pipeline
+from src.discovery.ledger import DiscoveryLedger
+from src.discovery.pipeline import Account
+from src.notify.briefs import strategy_review_brief, symbol_brief
+from src.notify.digest import idea_text, ideas_header, source_summary
 from src.common.secrets import load_notification_credentials
 from src.core.orchestrator import Orchestrator
 from src.core.proposals import ProposalStore
@@ -67,7 +77,13 @@ HELP = (
     "/flatten — liquidate everything\n"
     "/halt — stop all trading\n"
     "/reset — clear a HALT\n"
-    "/run — run a decision cycle now\n\n"
+    "/run — run a decision cycle now\n"
+    "/ideas — discover & rank fresh buy ideas (congress + technical)\n"
+    "/sources — what each discovery signal is contributing\n"
+    "/strategies — scoreboard (verdicts + live P&L)\n"
+    "/review — strategy brief to paste into Claude.ai\n"
+    "/brief SYM — symbol brief to paste into Claude.ai\n"
+    "/rotate <enable|disable|reweight> SYM [w] — propose a rotation\n\n"
     "💬 Natural language — just type or speak:\n"
     '  "buy 15 Tesla with 8% stop"\n'
     '  "show my positions"\n'
@@ -87,6 +103,14 @@ class Listener:
         self.service = TradeService(broker=self.broker, config=self.config)
         self.proposals = ProposalStore()
         self._whisper_model = None  # lazy-loaded on first voice message
+        # Smart NL parsing via the nl_router agent; the local regex (_parse_nl)
+        # is the fallback when no ANTHROPIC_API_KEY is set or the agent errors.
+        self.nl = NLCommandParser(fallback=self._parse_nl)
+        # Strategy rotation: the analyst proposes, you approve from here. Same
+        # rotation state the orchestrator reads, so an approval takes effect next cycle.
+        strategy_names = tuple(self.config.strategies.get("strategies", {}).keys()) or (
+            "trend_following", "mean_reversion", "breakout")
+        self.rotation = RotationService(strategy_names)
 
     # --- top-level message routing ---
 
@@ -141,14 +165,26 @@ class Listener:
             self._send(chat_id, self.service.reset().message)
         elif cmd == "run":
             self._run_cycle(chat_id)
+        elif cmd in ("ideas", "discover"):
+            self._run_discovery(chat_id)
+        elif cmd == "sources":
+            self._send(chat_id, source_summary(DiscoveryLedger().summarize()))
+        elif cmd in ("strategies", "scoreboard"):
+            self._show_strategies(chat_id)
+        elif cmd == "review":
+            self._run_review(chat_id)
+        elif cmd == "brief":
+            self._symbol_brief(chat_id, rest)
+        elif cmd == "rotate":
+            self._rotate(chat_id, rest)
         else:
             self._send(chat_id, f"Unknown command: /{cmd}\n\n{HELP}")
 
     # --- natural language ---
 
     def _handle_natural_language(self, chat_id: int, text: str) -> None:
-        """Parse free-form text with Claude Haiku and dispatch to the right handler."""
-        parsed = self._parse_nl(text)
+        """Parse free-form text (nl_router agent, regex fallback) and dispatch."""
+        parsed = self.nl.parse(text)
         if parsed is None:
             self._send(chat_id, "Couldn't parse that. " + HELP)
             return
@@ -197,7 +233,9 @@ class Listener:
         t = text.lower().strip()
 
         # --- close / sell (checked BEFORE status so "close my AAPL position" wins) ---
-        if re.search(r"\b(flatten|close all|liquidate( all| everything)?|exit all)\b", t):
+        if (re.search(r"\b(close|sell|exit|liquidate|dump)\s+(all|everything)\b", t)
+                or re.search(r"\bflatten\b", t)
+                or re.fullmatch(r"\s*liquidate\s*", t)):
             return {"cmd": "flatten"}
         close_m = re.search(
             r"\b(close|sell|exit|get out of|liquidate)\b[^a-z0-9]*([a-z .]+?)(?:\s+position)?\s*$", t
@@ -428,6 +466,10 @@ class Listener:
                 self._on_approve(chat_id, message_id, cq_id, data.split(":", 1)[1])
             elif data.startswith("deny:"):
                 self._on_deny(chat_id, message_id, cq_id, data.split(":", 1)[1])
+            elif data.startswith("rotapprove:"):
+                self._on_rotation_approve(chat_id, message_id, cq_id, data.split(":", 1)[1])
+            elif data.startswith("rotdeny:"):
+                self._on_rotation_deny(chat_id, message_id, cq_id, data.split(":", 1)[1])
             elif data.startswith("buy:"):
                 self._on_buy_confirm(chat_id, message_id, cq_id, data)
             elif data == "flatten":
@@ -517,6 +559,119 @@ class Listener:
             self.proposals.add(p)
             self._send(chat_id, f"🟡 PROPOSED\n{p.summary()}",
                        buttons=[[("✅ Approve", f"approve:{p.id}"), ("❌ Deny", f"deny:{p.id}")]])
+
+    # --- on-demand discovery (rank fresh buy ideas) ---
+
+    def _run_discovery(self, chat_id) -> None:
+        self._send(chat_id, "🔎 Discovering ideas (congress + technical)...")
+        self.proposals.purge_expired()
+        account_raw = self.broker.get_account()
+        account = Account(
+            equity=account_raw.equity,
+            last_equity=account_raw.last_equity,
+            buying_power=account_raw.buying_power,
+            daytrade_count=getattr(account_raw, "daytrade_count", None),
+        )
+        positions = self.service.store.load()
+        exclude = {p.symbol for p in self.proposals.list_pending()}
+        try:
+            pipeline = build_discovery_pipeline(self.config)
+            report = pipeline.run(account, positions, exclude=exclude)
+        except Exception as exc:
+            log.exception("discovery failed")
+            self._send(chat_id, f"Discovery failed: {exc}")
+            return
+
+        DiscoveryLedger().record_surface(report.candidates, report.proposals)
+        self._send(chat_id, ideas_header(len(report.proposals), report.screened))
+        cand_by_symbol = {c.symbol: c for c in report.candidates}
+        for proposal in report.proposals:
+            self.proposals.add(proposal)
+            cand = cand_by_symbol.get(proposal.symbol)
+            text = idea_text(cand) if cand else proposal.summary()
+            self._send(chat_id, text,
+                       buttons=[[("✅ Approve", f"approve:{proposal.id}"),
+                                 ("❌ Deny", f"deny:{proposal.id}")]])
+
+    # --- strategy scoreboard + rotation (analyst proposes, you approve) ---
+
+    def _show_strategies(self, chat_id) -> None:
+        rows = scoreboard_snapshot()["strategies"]
+        if not rows:
+            self._send(chat_id, "No scoreboard yet. Run `python -m scripts.evaluate_strategies` first.")
+            return
+        lines = ["📊 STRATEGIES"]
+        for s in rows:
+            live = (f"  · live {s['live_num_trades']}t ${s['live_total_pnl']:+,.0f}"
+                    if s["live_num_trades"] else "")
+            lines.append(
+                f"{s['strategy']}: {s['verdict'].upper()}  "
+                f"PSR {s['psr']:.2f} p{s['p_value']:.2f} ({s['num_trades']}t){live}"
+            )
+        self._send(chat_id, "\n".join(lines))
+
+    def _run_review(self, chat_id) -> None:
+        """Emit a strategy brief to paste into Claude.ai (you are the analyst)."""
+        self._send(chat_id, strategy_review_brief(scoreboard_snapshot(), positions_snapshot()))
+
+    def _symbol_brief(self, chat_id, rest: str) -> None:
+        if not rest.strip():
+            self._send(chat_id, "Usage: /brief SYM   e.g. /brief NVDA")
+            return
+        sym = rest.split()[0].upper()
+        ind = indicator_snapshot(sym)
+        if "note" in ind:
+            self._send(chat_id, f"No cached data for {sym}. Run a cycle or "
+                                "`evaluate_strategies` to populate the cache first.")
+            return
+        self._send(chat_id, symbol_brief(sym, ind, self._score_for_regime(ind.get("regime"))))
+
+    def _score_for_regime(self, regime):
+        """The scoreboard row for the strategy this regime routes to, if any."""
+        if not regime:
+            return None
+        strat = self.config.strategies.get("regime_filter", {}).get("routing", {}).get(regime)
+        if not strat:
+            return None
+        return next((s for s in scoreboard_snapshot()["strategies"] if s["strategy"] == strat), None)
+
+    def _rotate(self, chat_id, rest: str) -> None:
+        """Propose a rotation (after you've consulted Claude.ai). Approve/Deny inline."""
+        parts = rest.split()
+        if len(parts) < 2:
+            self._send(chat_id, "Usage: /rotate <enable|disable|reweight> STRATEGY [weight]")
+            return
+        action, strategy = parts[0].lower(), parts[1]
+        weight = None
+        if action == "reweight":
+            if len(parts) < 3:
+                self._send(chat_id, "reweight needs a weight 0–1: /rotate reweight breakout 0.5")
+                return
+            try:
+                weight = float(parts[2])
+            except ValueError:
+                self._send(chat_id, "weight must be a number between 0 and 1")
+                return
+        res = self.rotation.propose(action, strategy, weight=weight, rationale="via phone")
+        if not res["ok"]:
+            self._send(chat_id, f"⚠️ {res['error']}")
+            return
+        self._send(chat_id, f"🟡 ROTATION\n{res['summary']}",
+                   buttons=[[("✅ Approve", f"rotapprove:{res['proposal_id']}"),
+                             ("❌ Deny", f"rotdeny:{res['proposal_id']}")]])
+
+    def _on_rotation_approve(self, chat_id, message_id, cq_id, proposal_id: str) -> None:
+        res = self.rotation.approve(proposal_id)
+        if res["ok"]:
+            self._edit(chat_id, message_id, f"✅ Applied: {res['summary']}")
+            self._answer(cq_id, "Applied.")
+        else:
+            self._answer(cq_id, res.get("error", "failed")[:200])
+
+    def _on_rotation_deny(self, chat_id, message_id, cq_id, proposal_id: str) -> None:
+        self.rotation.deny(proposal_id)
+        self._edit(chat_id, message_id, "❌ Rotation denied.")
+        self._answer(cq_id, "Denied.")
 
     # --- telegram helpers (best-effort) ---
 

@@ -11,6 +11,7 @@ from src.core.orchestrator import Orchestrator
 from src.core.state_store import HaltStore, StateStore
 from src.execution.broker_alpaca import AccountView, OrderView, PositionView
 from src.execution.order_manager import ManagedPosition, PositionStatus
+from src.research.scoreboard import Scoreboard
 from src.risk.ratchet_stop import PercentRatchet
 from tests.unit.fakes import FakeBroker
 from tests.unit.synth import make_features
@@ -38,7 +39,8 @@ def make_orch(broker, tmp_path, execute=False, halt_store=None, **kw):
         broker=broker, feature_provider=approve_frame, execute=execute,
         state_store=StateStore(tmp_path / "positions.json"),
         halt_store=halt_store or HaltStore(tmp_path / "halt.json"),
-        audit=AuditLog(tmp_path / "audit.jsonl"), **kw,
+        audit=AuditLog(tmp_path / "audit.jsonl"),
+        scoreboard=Scoreboard(tmp_path / "scoreboard.json"), **kw,
     )
 
 
@@ -158,6 +160,7 @@ def test_opposite_ema_exit_closes_position(tmp_path):
         broker=broker, feature_provider=exit_frame, execute=True,
         state_store=StateStore(tmp_path / "p.json"),
         halt_store=HaltStore(tmp_path / "h.json"), audit=AuditLog(tmp_path / "a.jsonl"),
+        scoreboard=Scoreboard(tmp_path / "sb.json"),
     )
     orch.positions = {
         "AAPL": ManagedPosition(

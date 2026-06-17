@@ -76,7 +76,10 @@ def adx(
     plus_di = 100.0 * (_wilder(plus_dm, period) / atr_)
     minus_di = 100.0 * (_wilder(minus_dm, period) / atr_)
 
-    dx = 100.0 * (plus_di - minus_di).abs() / (plus_di + minus_di)
+    total_di = plus_di + minus_di
+    # Guard against 0/0 on flat bars (both DIs zero); NaN propagates safely through
+    # Wilder smoothing and is caught by has_nan() checks in the strategy layer.
+    dx = 100.0 * (plus_di - minus_di).abs() / total_di.where(total_di != 0, np.nan)
     adx_ = _wilder(dx, period)
 
     return pd.DataFrame(

@@ -28,4 +28,43 @@ logging:
 
 alerts:
   enabled: true
+  channel: telegram               # telegram | none  (token + chat ids in .env)
   on: [halt, kill_switch, reconciliation_mismatch, fill, daily_summary]
+
+approval:
+  # Propose-and-approve: the bot decides and pushes trades to the phone but
+  # places NOTHING until you approve. `--execute` is converted to propose while
+  # this is true. Set false to restore direct auto-execution.
+  require_approval: true
+  proposal_expiry_minutes: 1080   # 18h -- a proposal made near the close expires
+                                  # before the next session if left untouched
+
+discovery:
+  # Autonomous idea discovery: gather candidates from multiple free signal
+  # sources, score them deterministically, and push the top N to the phone as
+  # Approve/Deny suggestions. Discovery NEVER places an order itself -- it only
+  # proposes through the same risk gate as everything else (you approve).
+  enabled: true
+  top_n: 4                 # how many ranked ideas to surface per run
+  min_score: 25            # 0-100 confidence floor; below this we don't suggest
+  sources:                 # which signal sources are live (phased rollout)
+    congress: true         # Phase A -- CapitolTrades disclosures (free, scraped)
+    technical: true        # Phase A -- the 3 built strategies + regime filter
+    news: false            # Phase B -- Alpaca free news/sentiment
+    fundamentals: false    # Phase C -- yfinance quality filter
+  weights:                 # relative blend weights (renormalised over the
+                           # sources that are switched on); confluence scores higher
+    congress: 0.60         # lead signal -- congress drives the ranking
+    technical: 0.35
+    news: 0.15
+    fundamentals: 0.15
+  congress:
+    politicians: []        # empty = any member in the file; else an allowlist
+    max_disclosure_age_days: 60   # disclosures lag 30-45d; still-relevant names
+                                  # stay eligible out to ~2 months (matches congress_copy)
+    default_stop_pct: 10.0 # protective stop for a congress-only (no-technical) idea
+  news:
+    lookback_days: 7       # how far back to read headlines for sentiment
+  universe:
+    # Extra tickers to technically screen beyond the watchlist + congress names.
+    extra: [NVDA, AMD, GOOGL, AMZN, META, JPM, MS, COF, ISRG, PLTR]

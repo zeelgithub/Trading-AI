@@ -23,9 +23,26 @@ DEFAULT_PATH = PROJECT_ROOT / "state" / "positions.json"
 DEFAULT_HALT_PATH = PROJECT_ROOT / "state" / "halt.json"
 
 
+class HaltClass:
+    """Why the bot halted. The class -- not the free-text reason -- decides whether
+    a halt is ever eligible for automatic resume (see src/core/self_heal.py).
+    Only STALE_DATA and DISCONNECT are auto-resumable; the rest stay manual."""
+
+    MANUAL = "manual"
+    RECONCILE_MISMATCH = "reconcile_mismatch"
+    KILL_SWITCH = "kill_switch"
+    STALE_DATA = "stale_data"
+    DISCONNECT = "disconnect"
+    EXCEPTION = "exception"
+    SYMBOL_ERRORS = "symbol_errors"
+    CONFIG = "config"
+    UNKNOWN = "unknown"
+
+
 class HaltStore:
     """Persists a HALT across cold runs so the bot does NOT self-resume between
-    separate scheduled invocations. Cleared only by an explicit manual reset."""
+    separate scheduled invocations. Cleared only by an explicit manual reset --
+    or, for whitelisted transient classes, by the verified self-healer."""
 
     def __init__(self, path: str | Path = DEFAULT_HALT_PATH) -> None:
         self.path = Path(path)
@@ -37,11 +54,27 @@ class HaltStore:
         with self.path.open("r", encoding="utf-8") as fh:
             return json.load(fh).get("reason", "halted")
 
-    def set(self, reason: str) -> None:
+    def halt_info(self) -> dict | None:
+        """Full halt record {reason, class, ts}, or None if not halted."""
+        if not self.path.exists():
+            return None
+        with self.path.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return {
+            "reason": data.get("reason", "halted"),
+            "class": data.get("class", HaltClass.UNKNOWN),
+            "ts": data.get("ts"),
+        }
+
+    def set(self, reason: str, halt_class: str = HaltClass.UNKNOWN) -> None:
         from datetime import datetime, timezone
 
         with self.path.open("w", encoding="utf-8") as fh:
-            json.dump({"reason": reason, "ts": datetime.now(timezone.utc).isoformat()}, fh, indent=2)
+            json.dump(
+                {"reason": reason, "class": halt_class,
+                 "ts": datetime.now(timezone.utc).isoformat()},
+                fh, indent=2,
+            )
 
     def clear(self) -> None:
         self.path.unlink(missing_ok=True)

@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "market-data": {
+      "command": ".venv/Scripts/python.exe",
+      "args": ["-m", "mcp_servers.market_data.server"]
+    },
+    "portfolio-state": {
+      "command": ".venv/Scripts/python.exe",
+      "args": ["-m", "mcp_servers.portfolio_state.server"]
+    }
+  }
+}

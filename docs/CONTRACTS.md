@@ -44,3 +44,33 @@ Strategy -> Intent -> SentimentGate (adjusts confidence) -> RiskManager.evaluate
 
 The risk layer owns final sizing; a strategy's `entry_price`/`stop_loss` are
 inputs, and `approved_qty` on the `RiskDecision` is authoritative for execution.
+
+## Proposal (`src/core/proposals.py`) — propose-and-approve
+
+In propose mode a risk-approved entry is persisted (`state/proposals.json`) and
+pushed to the phone instead of being opened. It wraps the `Intent` wire dict
+above plus what's needed to rebuild the protective stop on approval. On approval
+the `intent` is re-validated and **re-run through the risk gate** with fresh
+account state before any order is placed.
+
+```json
+{
+  "id": "NVDA-20260615-a1b2c3",
+  "intent": { "symbol": "NVDA", "signal": "BUY", "...": "Intent wire dict" },
+  "approved_qty": 18,
+  "strategy": "trend_following",
+  "ratchet_params": { "initial_stop_pct": 10.0, "lock_trigger_pct": 10.0 },
+  "atr": null,
+  "status": "pending",
+  "created_ts": "2026-06-15T19:45:00+00:00",
+  "expiry_ts": "2026-06-16T13:45:00+00:00"
+}
+```
+
+| Field | Notes |
+|-------|-------|
+| `id` | `SYMBOL-YYYYMMDD-<rand>`; used in Approve/Deny callback data |
+| `intent` | the `Intent` wire dict (with computed `entry_price`/`stop_loss`) |
+| `approved_qty` | qty the risk gate approved at propose time (a ceiling, re-checked on approval) |
+| `ratchet_params` / `atr` | per-strategy ratchet config to rebuild the stop |
+| `status` | `pending` → `approved` / `denied` / `expired` |

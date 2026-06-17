@@ -39,3 +39,16 @@ class AuditLog:
         entry = {"ts": datetime.now(timezone.utc).isoformat(), "event": event, **fields}
         with self.path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(entry, default=str) + "\n")
+
+    def tail(self, n: int = 20) -> list[dict]:
+        """The most recent `n` audit entries (oldest first), for triage context."""
+        if not self.path.exists():
+            return []
+        lines = self.path.read_text(encoding="utf-8").splitlines()[-max(0, n):]
+        out = []
+        for line in lines:
+            try:
+                out.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        return out

@@ -26,7 +26,7 @@ from src.common.config import Config, load_config
 from src.common.logging import AuditLog, get_logger
 from src.common.models import Action, Decision, Intent, RiskDecision, Side
 from src.core.proposals import Proposal
-from src.core.state_store import HaltStore, StateStore
+from src.core.state_store import HaltClass, HaltStore, StateStore
 from src.execution.broker_alpaca import BrokerInterface
 from src.execution.order_manager import OrderManager, PositionStatus
 from src.risk.ratchet_stop import PercentRatchet, build_ratchet
@@ -134,7 +134,7 @@ class TradeService:
         )
 
     def halt(self, reason: str = "manual halt") -> TradeResult:
-        self.halt_store.set(reason)
+        self.halt_store.set(reason, HaltClass.MANUAL)
         self.audit.record("manual_halt", reason=reason)
         return TradeResult(True, "ok", f"HALTED: {reason}")
 
