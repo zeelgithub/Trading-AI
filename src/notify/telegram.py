@@ -63,9 +63,20 @@ class TelegramClient:
             self._session = requests.Session()
         return self._session
 
+    def _scrub(self, text: str) -> str:
+        """Redact the bot token from any string destined for logs/errors --
+        transport exceptions embed the full request URL, token included."""
+        return text.replace(self.creds.bot_token, "***") if self.creds.bot_token else text
+
     def _api(self, method: str, payload: dict, timeout: float = 30.0) -> dict:
         url = f"{self.creds.api_base_url}/bot{self.creds.bot_token}/{method}"
-        resp = self._get_session().post(url, json=payload, timeout=timeout)
+        try:
+            resp = self._get_session().post(url, json=payload, timeout=timeout)
+        except Exception as exc:
+            # Re-raise with the token scrubbed so no caller can log it.
+            raise RuntimeError(
+                f"telegram {method} transport error: {self._scrub(str(exc))}"
+            ) from None
         data = resp.json()
         if not data.get("ok", False):
             raise RuntimeError(f"telegram {method} failed: {data.get('description')}")

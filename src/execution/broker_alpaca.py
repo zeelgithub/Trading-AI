@@ -54,12 +54,22 @@ class AccountView:
     pattern_day_trader: bool
 
 
+@dataclass(frozen=True)
+class AssetView:
+    """One tradable listing from the broker's asset catalog (read-only)."""
+
+    symbol: str
+    name: str
+    tradable: bool
+
+
 class BrokerInterface(Protocol):
     """The minimal surface the execution layer needs. AlpacaBroker implements
     it; tests provide a fake."""
 
     def get_account(self) -> AccountView: ...
     def is_market_open(self) -> bool: ...
+    def list_assets(self) -> list[AssetView]: ...
     def list_positions(self) -> list[PositionView]: ...
     def list_open_orders(self) -> list[OrderView]: ...
     def get_order(self, order_id: str) -> OrderView: ...
@@ -121,6 +131,18 @@ class AlpacaBroker:
     def is_market_open(self) -> bool:
         return bool(self._get_client().get_clock().is_open)
 
+    def list_assets(self) -> list[AssetView]:
+        """Active US-equity listings (symbol + company name). Read-only; feeds
+        the symbol resolver so 'buy palantir' works without a hardcoded table."""
+        from alpaca.trading.enums import AssetClass, AssetStatus
+        from alpaca.trading.requests import GetAssetsRequest
+
+        req = GetAssetsRequest(status=AssetStatus.ACTIVE, asset_class=AssetClass.US_EQUITY)
+        return [
+            AssetView(symbol=str(a.symbol), name=str(a.name or ""), tradable=bool(a.tradable))
+            for a in self._get_client().get_all_assets(req)
+        ]
+
     def list_positions(self) -> list[PositionView]:
         out = []
         for p in self._get_client().get_all_positions():
@@ -159,7 +181,10 @@ class AlpacaBroker:
             symbol=symbol,
             qty=qty,
             side=self._alpaca_side(side),
-            time_in_force=TimeInForce.DAY,
+            # GTC, not DAY: bracket/OTO legs inherit the parent's TIF, and a DAY
+            # stop leg EXPIRES at the close -- leaving a swing position naked
+            # the next morning (exactly the UNPROTECTED halt seen 2026-06-19).
+            time_in_force=TimeInForce.GTC,
             client_order_id=client_order_id,
             stop_loss=StopLossRequest(stop_price=round(stop_price, 2)),
         )

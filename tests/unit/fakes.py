@@ -10,7 +10,17 @@ from __future__ import annotations
 from dataclasses import replace
 
 from src.common.models import Side
-from src.execution.broker_alpaca import AccountView, OrderView, PositionView
+from src.execution.broker_alpaca import AccountView, AssetView, OrderView, PositionView
+
+DEFAULT_ASSETS = [
+    AssetView("AAPL", "Apple Inc. Common Stock", True),
+    AssetView("TSLA", "Tesla, Inc. Common Stock", True),
+    AssetView("NVDA", "NVIDIA Corporation Common Stock", True),
+    AssetView("RKLB", "Rocket Lab USA, Inc.", True),
+    AssetView("BAC", "Bank of America Corporation", True),
+    AssetView("BK", "The Bank of New York Mellon Corporation", True),
+    AssetView("HALT", "Halted Holdings", False),  # not tradable
+]
 
 
 class FakeBroker:
@@ -44,6 +54,9 @@ class FakeBroker:
 
     def is_market_open(self) -> bool:
         return self._market_open
+
+    def list_assets(self) -> list[AssetView]:
+        return list(DEFAULT_ASSETS)
 
     def list_positions(self) -> list[PositionView]:
         return list(self.positions)

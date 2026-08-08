@@ -45,6 +45,7 @@ from src.notify.digest import idea_text, ideas_header, source_summary
 from src.common.secrets import load_notification_credentials
 from src.core.orchestrator import Orchestrator
 from src.core.proposals import ProposalStore
+from src.core.symbols import SymbolResolver
 from src.core.trade_service import TradeService
 from src.execution.broker_alpaca import AlpacaBroker
 from src.notify.telegram import TelegramClient, build_notifier
@@ -100,7 +101,11 @@ class Listener:
         self.creds = load_notification_credentials()
         self.client = TelegramClient(self.creds)
         self.broker = AlpacaBroker()
-        self.service = TradeService(broker=self.broker, config=self.config)
+        # Dynamic symbol resolution: the broker's full asset catalog (cached),
+        # with the nickname table as an alias layer on top.
+        self.service = TradeService(
+            broker=self.broker, config=self.config,
+            symbol_resolver=SymbolResolver(self.broker, aliases=_COMPANY_TO_TICKER))
         self.proposals = ProposalStore()
         self._whisper_model = None  # lazy-loaded on first voice message
         # Smart NL parsing via the nl_router agent; the local regex (_parse_nl)
@@ -203,12 +208,25 @@ class Listener:
             except (KeyError, ValueError, TypeError):
                 qty = 0
             stop = float(parsed.get("stop") or 10.0)
-            if not sym or qty <= 0:
+            if qty <= 0:
                 self._send(chat_id,
-                           'Couldn\'t get the symbol or quantity. Try: "buy 15 TSLA with 8% stop"')
+                           'Couldn\'t get the quantity. Try: "buy 15 TSLA with 8% stop"')
                 return
-            self._send(chat_id, f"Confirm BUY {qty} {sym} (stop {stop:g}%)?",
-                       buttons=[[("✅ Confirm", f"buy:{sym}:{qty}:{stop}"), ("Cancel", "cancel")]])
+            # Validate/resolve against the broker's asset catalog -- catches
+            # typos, resolves company names, and is honest about non-listings.
+            res = self.service.resolve_symbol(sym or parsed.get("raw") or "")
+            if res.status == "ambiguous":
+                lines = [f"  {s} — {n}" for s, n in res.candidates]
+                self._send(chat_id, "Did you mean:\n" + "\n".join(lines)
+                           + f'\n\nTry: "buy {qty} <SYMBOL>"')
+                return
+            if not res.ok:
+                self._send(chat_id, res.note or "I couldn't find that symbol.")
+                return
+            label = f"{res.symbol} ({res.name})" if res.name else res.symbol
+            self._send(chat_id, f"Confirm BUY {qty} {label} (stop {stop:g}%)?",
+                       buttons=[[("✅ Confirm", f"buy:{res.symbol}:{qty}:{stop}"),
+                                 ("Cancel", "cancel")]])
 
         elif cmd == "close":
             sym = (parsed.get("sym") or "").strip().upper()
@@ -231,6 +249,14 @@ class Listener:
         """
         import re
         t = text.lower().strip()
+
+        # --- greetings / smalltalk: answer like a helper, not an error ---
+        if re.fullmatch(r"(hey|hi|hello|yo|howdy|sup|hiya|thanks|thank you|ty"
+                        r"|good (morning|afternoon|evening))[!. ]*", t):
+            return {"cmd": "unknown",
+                    "reply": "👋 Hey! I'm your trading bot. Try:\n"
+                             '  "show my positions"\n  "buy 10 TSLA with 8% stop"\n'
+                             '  "close Apple"\n  "halt the bot"'}
 
         # --- close / sell (checked BEFORE status so "close my AAPL position" wins) ---
         if (re.search(r"\b(close|sell|exit|liquidate|dump)\s+(all|everything)\b", t)
@@ -289,12 +315,14 @@ class Listener:
             cleaned = re.sub(r"\b(buy|purchase|get|pick up|long|shares?|of|with|a|an|the|stop|loss|percent|and)\b", "", cleaned)
             sym = _resolve_sym(cleaned.strip())
 
-            if sym and qty > 0:
-                return {"cmd": "buy", "sym": sym, "qty": qty, "stop": stop}
-            if not sym:
-                return {"cmd": "unknown", "reply": "I couldn't identify the stock symbol. Try: \"buy 10 TSLA\" or \"buy 10 Tesla\"."}
             if qty <= 0:
                 return {"cmd": "unknown", "reply": "How many shares? Try: \"buy 10 TSLA\"."}
+            if sym:
+                return {"cmd": "buy", "sym": sym, "qty": qty, "stop": stop}
+            # No static match: pass the raw words up -- the dispatcher resolves
+            # them against the broker's full asset catalog (dynamic path).
+            return {"cmd": "buy", "sym": None, "raw": cleaned.strip(),
+                    "qty": qty, "stop": stop}
 
         return {"cmd": "unknown",
                 "reply": "I didn't understand that. Try: \"buy 10 TSLA\", \"close AAPL\", \"show status\", or /help."}
@@ -430,8 +458,11 @@ class Listener:
             text = result["text"].strip()
 
         except Exception as exc:
-            log.exception("voice transcription failed")
-            self._send(chat_id, f"Voice transcription failed: {exc}")
+            # Scrub the bot token before logging/sending: transport errors embed
+            # the full getFile/download URL, token included.
+            detail = str(exc).replace(self.creds.bot_token, "***")
+            log.error("voice transcription failed: %s", detail)
+            self._send(chat_id, f"Voice transcription failed: {detail}")
             return None
         finally:
             for p in (ogg_path, wav_path):
@@ -533,8 +564,17 @@ class Listener:
             self._send(chat_id, "Usage: /buy SYM QTY [--stop PCT]   e.g. /buy NVDA 20 --stop 8")
             return
         sym, qty, stop = parsed
-        self._send(chat_id, f"Confirm BUY {qty} {sym} (stop {stop:g}%)?",
-                   buttons=[[("✅ Confirm", f"buy:{sym}:{qty}:{stop}"), ("Cancel", "cancel")]])
+        res = self.service.resolve_symbol(sym)
+        if res.status == "ambiguous":
+            lines = [f"  {s} — {n}" for s, n in res.candidates]
+            self._send(chat_id, "Did you mean:\n" + "\n".join(lines))
+            return
+        if not res.ok:
+            self._send(chat_id, res.note or f"Unknown symbol {sym}.")
+            return
+        label = f"{res.symbol} ({res.name})" if res.name else res.symbol
+        self._send(chat_id, f"Confirm BUY {qty} {label} (stop {stop:g}%)?",
+                   buttons=[[("✅ Confirm", f"buy:{res.symbol}:{qty}:{stop}"), ("Cancel", "cancel")]])
 
     def _on_buy_confirm(self, chat_id, message_id, cq_id, data: str) -> None:
         _, sym, qty, stop = data.split(":")
@@ -695,6 +735,21 @@ class Listener:
 
     # --- poll loop ---
 
+    def _beat(self) -> None:
+        """Heartbeat for the watchdog (scripts/healthcheck.py): proves the
+        listener loop is alive. Best-effort -- never let it affect polling."""
+        try:
+            from datetime import datetime, timezone
+            from pathlib import Path
+
+            from src.common.jsonio import atomic_write_json
+            atomic_write_json(
+                Path(__file__).resolve().parents[1] / "state" / "listener_heartbeat.json",
+                {"ts": datetime.now(timezone.utc).isoformat()},
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning("heartbeat write failed: %s", exc)
+
     def run(self) -> None:
         # Skip any backlog so a restart never re-acts on stale taps.
         offset = self._drain()
@@ -702,6 +757,7 @@ class Listener:
         for chat_id in self.creds.allowed_chat_ids:
             self._send(chat_id, "🟢 Listener online — ready for commands.")
         while True:
+            self._beat()
             try:
                 updates = self.client.get_updates(offset=offset, timeout=25)
             except Exception as exc:
