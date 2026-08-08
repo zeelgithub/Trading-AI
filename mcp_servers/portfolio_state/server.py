@@ -38,6 +38,29 @@ def get_scoreboard() -> dict:
     return portfolio_view.scoreboard_snapshot()
 
 
+@mcp.tool()
+def get_ops_status() -> dict:
+    """Operational health: halt record (reason/class/ts), the last completed
+    cycle (when + what it did), the last halt-worthy event, recent audit
+    events, and pending trade proposals. Use this first when diagnosing
+    "why didn't the bot trade?"."""
+    return portfolio_view.ops_snapshot()
+
+
+@mcp.tool()
+def get_audit_tail(n: int = 20) -> dict:
+    """The most recent `n` audit-trail events (oldest first): signals, risk
+    verdicts, orders, halts, reconcile results."""
+    return portfolio_view.audit_tail(n)
+
+
+@mcp.tool()
+def get_pending_proposals() -> dict:
+    """Trade proposals awaiting phone approval (id, symbol, qty, strategy,
+    created/expiry timestamps)."""
+    return {"proposals": portfolio_view.ops_snapshot()["pending_proposals"]}
+
+
 def main() -> None:
     mcp.run()
 

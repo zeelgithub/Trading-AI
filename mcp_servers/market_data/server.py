@@ -35,6 +35,15 @@ def get_indicators(symbol: str) -> dict:
     return queries.indicator_snapshot(symbol)
 
 
+@mcp.tool()
+def get_data_health(symbols: list[str] | None = None) -> dict:
+    """Bar-cache freshness per symbol (watchlist by default): last bar date,
+    age in days, and whether each passes the orchestrator's max_bar_age_days
+    gate. `all_fresh: false` means the bot is skipping (or halting on) stale
+    symbols."""
+    return queries.data_health(symbols)
+
+
 def main() -> None:
     mcp.run()
 

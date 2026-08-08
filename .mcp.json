@@ -7,6 +7,10 @@
     "portfolio-state": {
       "command": ".venv/Scripts/python.exe",
       "args": ["-m", "mcp_servers.portfolio_state.server"]
+    },
+    "trading-research": {
+      "command": ".venv/Scripts/python.exe",
+      "args": ["-m", "mcp_servers.trading_research.server"]
     }
   }
 }

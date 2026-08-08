@@ -26,6 +26,7 @@ from typing import Callable
 import pandas as pd
 
 from src.common.config import Config, load_config
+from src.common.errors import is_transient_error, retry_transient
 from src.common.logging import AuditLog, get_logger
 from src.common.models import Decision, Side
 from src.core.proposals import Proposal
@@ -39,11 +40,9 @@ from src.execution.reconciler import Reconciler
 from src.research.scoreboard import Scoreboard
 from src.risk.ratchet_stop import build_ratchet
 from src.risk.risk_manager import AccountState, RiskManager
-from src.strategy.breakout import Breakout
-from src.strategy.mean_reversion import MeanReversion
 from src.strategy.regime_filter import RegimeFilter
+from src.strategy.registry import build_strategies
 from src.strategy.sentiment_gate import SentimentGate
-from src.strategy.trend_following import TrendFollowing
 
 FeatureProvider = Callable[[str], pd.DataFrame]
 
@@ -62,6 +61,8 @@ class CycleReport:
     exited: list = field(default_factory=list)          # (symbol, reason)
     decisions: list = field(default_factory=list)       # (symbol, decision, qty)
     skipped: list = field(default_factory=list)         # (symbol, why)
+    stale: list = field(default_factory=list)           # (symbol, age_days)
+    data_checked: int = 0                               # symbols whose bars were age-checked
 
     def summary(self) -> str:
         if self.halted:
@@ -100,13 +101,13 @@ class Orchestrator:
         self.notifier = notifier or NullNotifier()
         self.feature_provider = feature_provider or self._default_feature_provider()
 
+        # Never trade on stale data (rule 3): bars older than this are unusable.
+        self.max_bar_age_days = int(self.config.get("settings.data.max_bar_age_days", 4))
         self.regime = RegimeFilter(self.config)
         self.sentiment = SentimentGate(self.config, scorer=scorer)
-        self.strategies = {
-            "trend_following": TrendFollowing(self.config),
-            "mean_reversion": MeanReversion(self.config),
-            "breakout": Breakout(self.config),
-        }
+        # Config-driven: every registered strategy with a strategies.yaml block.
+        # Adding a strategy = new module + @register + config; no edits here.
+        self.strategies = build_strategies(self.config)
         self.risk = RiskManager(self.config)
         self.order_manager = OrderManager(broker)
         self.reconciler = Reconciler(broker)
@@ -146,7 +147,9 @@ class Orchestrator:
 
         try:
             self.state.to(State.RUNNING)
-            account = self.broker.get_account()
+            # Ride out brief network blips; a persistent outage still raises and
+            # halts as DISCONNECT below (auto-resumable once verified back).
+            account = retry_transient(self.broker.get_account)
 
             # 0. Settle pending fills so reconcile + sizing act on filled_qty.
             if self.execute:
@@ -181,7 +184,7 @@ class Orchestrator:
                 self._halt(report, f"kill switch: {ks.reason}", HaltClass.KILL_SWITCH)
                 return report
 
-            market_open = self.broker.is_market_open()
+            market_open = retry_transient(self.broker.is_market_open)
 
             # 3. Raise resting stops (safe even when closed -- trails the stop).
             self._raise_stops(report)
@@ -208,11 +211,30 @@ class Orchestrator:
                         if not self.risk.breakers.register_error().ok:
                             raise RuntimeError("too many consecutive errors") from exc
 
+                # Every symbol we could age-check came back stale -> the feed
+                # itself has stalled. Default-to-halt rather than idle silently.
+                if report.data_checked > 0 and len(report.stale) == report.data_checked:
+                    self.audit.record("stale_data", detail=str(report.stale))
+                    self._halt(report,
+                               f"stale data on all {report.data_checked} checked symbol(s): "
+                               f"{report.stale}", HaltClass.STALE_DATA)
+                    return report
+
             if self.execute:
                 self.store.save(self.positions)
             self.risk.breakers.reset_errors()
             self.state.to(State.IDLE)
             report.state = self.state.state.value
+            # Ops heartbeat: lets the watchdog / MCP ops view answer "did the
+            # last cycle actually run, and what did it do?"
+            self.audit.record(
+                "cycle_complete",
+                mode=("execute" if self.execute else "propose" if self.propose else "shadow"),
+                summary=report.summary(),
+                opened=len(report.opened), proposed=len(report.proposed),
+                exited=len(report.exited), stops_raised=len(report.stops_raised),
+                stale=len(report.stale),
+            )
             self.log.info(report.summary())
             return report
 
@@ -223,7 +245,11 @@ class Orchestrator:
                     self.store.save(self.positions)
                 except Exception:  # pragma: no cover - best-effort persist
                     pass
-            self._halt(report, f"cycle exception: {exc}", HaltClass.EXCEPTION)
+            # Connectivity faults halt as DISCONNECT so the verified self-healer
+            # may resume them; logic errors stay EXCEPTION (manual reset only).
+            halt_class = (HaltClass.DISCONNECT if is_transient_error(exc)
+                          else HaltClass.EXCEPTION)
+            self._halt(report, f"cycle exception: {exc}", halt_class)
             return report
 
     def reset(self) -> None:
@@ -238,6 +264,19 @@ class Orchestrator:
             if pos.status == PositionStatus.PENDING_ENTRY:
                 self.order_manager.settle(pos)
 
+    def _bar_age(self, feats) -> int | None:
+        from src.data.ingest import last_bar_age_days  # lazy: keep tests offline-light
+
+        return last_bar_age_days(feats)
+
+    def _is_stale(self, symbol: str, feats, action: str) -> bool:
+        """True (and audited) when the newest bar is too old to act on."""
+        age = self._bar_age(feats)
+        if age is not None and age > self.max_bar_age_days:
+            self.audit.record("stale_symbol", symbol=symbol, age_days=age, during=action)
+            return True
+        return False
+
     def _evaluate_exits(self, report: CycleReport) -> None:
         for symbol, pos in list(self.positions.items()):
             if pos.status != PositionStatus.OPEN:
@@ -245,6 +284,8 @@ class Orchestrator:
             feats = self.feature_provider(symbol)
             if feats is None or feats.empty:
                 continue
+            if self._is_stale(symbol, feats, "exit_check"):
+                continue  # never exit on an old signal; the resting stop protects
             strat = self.strategies.get(pos.strategy)
             reason = strat.should_exit(symbol, feats, pos.side) if strat else None
             if not reason:
@@ -263,22 +304,41 @@ class Orchestrator:
             feats = self.feature_provider(symbol)
             if feats is None or feats.empty:
                 continue
+            if self._is_stale(symbol, feats, "raise_stops"):
+                continue  # don't feed an old close into the ratchet
             price = float(feats.iloc[-1].close)
             atr = float(feats.iloc[-1].atr) if "atr" in feats.columns else None
-            if self.execute:
-                if self.order_manager.raise_stop(pos, price, atr):
-                    report.stops_raised.append((symbol, round(pos.current_stop, 2)))
-                    self.audit.record("stop_raised", symbol=symbol, stop=pos.current_stop)
-            else:
-                new_stop = pos.ratchet.update(price, atr)
-                more = (new_stop > pos.current_stop) if pos.side == Side.LONG else (new_stop < pos.current_stop)
-                if more:
-                    report.stops_raised.append((symbol, round(new_stop, 2)))
+            try:
+                if self.execute:
+                    if self.order_manager.raise_stop(pos, price, atr):
+                        report.stops_raised.append((symbol, round(pos.current_stop, 2)))
+                        self.audit.record("stop_raised", symbol=symbol, stop=pos.current_stop)
+                else:
+                    new_stop = pos.ratchet.update(price, atr)
+                    more = (new_stop > pos.current_stop) if pos.side == Side.LONG else (new_stop < pos.current_stop)
+                    if more:
+                        report.stops_raised.append((symbol, round(new_stop, 2)))
+            except Exception as exc:
+                # One rejected replace must not halt the whole bot: the existing
+                # resting stop still protects this position. Isolate + count it;
+                # persistent failures trip the consecutive-error breaker.
+                self.audit.record("stop_raise_error", symbol=symbol, error=str(exc))
+                self.log.warning("stop raise failed for %s (resting stop unchanged): %s",
+                                 symbol, exc)
+                if not self.risk.breakers.register_error().ok:
+                    raise RuntimeError("too many consecutive errors raising stops") from exc
 
     def _consider_entry(self, symbol, account, report: CycleReport) -> None:
         feats = self.feature_provider(symbol)
         if feats is None or feats.empty:
             report.skipped.append((symbol, "no data"))
+            return
+        report.data_checked += 1
+        age = self._bar_age(feats)
+        if age is not None and age > self.max_bar_age_days:
+            report.stale.append((symbol, age))
+            report.skipped.append((symbol, f"stale data ({age}d old)"))
+            self.audit.record("stale_symbol", symbol=symbol, age_days=age)
             return
         active = self.regime.active_strategy(feats)
         if active is None:
@@ -419,16 +479,6 @@ class Orchestrator:
         return gross, count
 
     def _default_feature_provider(self) -> FeatureProvider:
-        from src.data import store
-        from src.data.features import build_features
-        from src.data.ingest import ingest_symbol
+        from src.data.ingest import live_feature_provider
 
-        config = self.config
-        lookback = int(config.get("settings.data.lookback_days", 400))
-        conn = store.connect()
-
-        def provider(symbol: str) -> pd.DataFrame:
-            ingest_symbol(conn, symbol, lookback_days=lookback)
-            return build_features(store.load_bars(conn, symbol), config)
-
-        return provider
+        return live_feature_provider(self.config)

@@ -15,6 +15,8 @@ Boundary: read-only; places orders NO.
 
 from __future__ import annotations
 
+from src.common.logging import AuditLog
+from src.core.proposals import ProposalStore
 from src.core.state_store import HaltStore, StateStore
 from src.execution.order_manager import PositionStatus
 from src.research.scoreboard import Scoreboard
@@ -44,6 +46,41 @@ def halt_snapshot(*, halt_store: HaltStore | None = None) -> dict:
     halt_store = halt_store or HaltStore()
     reason = halt_store.is_halted()
     return {"halted": reason is not None, "reason": reason}
+
+
+def ops_snapshot(*, halt_store: HaltStore | None = None, audit: AuditLog | None = None,
+                 proposal_store: ProposalStore | None = None, tail_n: int = 20) -> dict:
+    """Operational health in one call: full halt record, when the last cycle
+    actually ran (and what it did), recent audit events, and pending proposals.
+    Answers "why didn't my bot trade today?" without touching the broker."""
+    halt_store = halt_store or HaltStore()
+    audit = audit or AuditLog()
+    proposal_store = proposal_store or ProposalStore()
+
+    # Search a deeper tail for the last completed cycle; keep the surfaced
+    # event list short.
+    deep = audit.tail(500)
+    last_cycle = next((e for e in reversed(deep) if e.get("event") == "cycle_complete"), None)
+    last_halt_event = next((e for e in reversed(deep)
+                            if e.get("event") in ("reconcile_mismatch", "kill_switch",
+                                                  "stale_data", "cycle_exception")), None)
+    pending = proposal_store.list_pending()
+    return {
+        "halt": halt_store.halt_info(),          # None when not halted
+        "last_cycle": last_cycle,                # None if no cycle has ever logged
+        "last_halt_event": last_halt_event,
+        "recent_events": deep[-max(0, tail_n):],
+        "pending_proposals": [
+            {"id": p.id, "symbol": p.symbol, "qty": p.approved_qty,
+             "strategy": p.strategy, "created": p.created_ts, "expires": p.expiry_ts}
+            for p in pending
+        ],
+    }
+
+
+def audit_tail(n: int = 20, *, audit: AuditLog | None = None) -> dict:
+    """The most recent `n` audit-trail events (oldest first)."""
+    return {"events": (audit or AuditLog()).tail(n)}
 
 
 def scoreboard_snapshot(*, scoreboard: Scoreboard | None = None) -> dict:

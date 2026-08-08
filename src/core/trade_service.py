@@ -27,6 +27,7 @@ from src.common.logging import AuditLog, get_logger
 from src.common.models import Action, Decision, Intent, RiskDecision, Side
 from src.core.proposals import Proposal
 from src.core.state_store import HaltClass, HaltStore, StateStore
+from src.core.symbols import ResolveResult, SymbolResolver
 from src.execution.broker_alpaca import BrokerInterface
 from src.execution.order_manager import OrderManager, PositionStatus
 from src.risk.ratchet_stop import PercentRatchet, build_ratchet
@@ -97,6 +98,7 @@ class TradeService:
         halt_store: HaltStore | None = None,
         price_fn: PriceFn | None = None,
         audit: AuditLog | None = None,
+        symbol_resolver: SymbolResolver | None = None,
     ) -> None:
         self.broker = broker
         self.config = config or load_config()
@@ -106,7 +108,13 @@ class TradeService:
         self.orders = OrderManager(broker)
         self._price_fn = price_fn
         self.audit = audit or AuditLog()
+        self.symbols = symbol_resolver or SymbolResolver(broker)
         self.log = get_logger("trade_service")
+
+    def resolve_symbol(self, query: str) -> ResolveResult:
+        """Resolve free-form text to a validated tradable ticker (or an honest
+        ambiguous/none) against the broker's cached asset catalog."""
+        return self.symbols.resolve(query)
 
     # --- read / control ---
     def status(self) -> StatusReport:
@@ -233,6 +241,18 @@ class TradeService:
 
     # --- internals ---
     def _gate_and_open(self, intent, positions, price, requested_qty, ratchet, tag) -> TradeResult:
+        # Rule 6: new entries only while the market is open. A market order
+        # queued overnight fills at the next open while its stop was priced off
+        # the previous close -- a gap can multiply the intended risk. Refuse and
+        # let the human approve during regular hours instead.
+        if not self.broker.is_market_open():
+            return TradeResult(
+                False, "market_closed",
+                f"Market is closed -- not queueing {intent.symbol}. The stop would be "
+                "priced off a stale close and an overnight gap could exceed the "
+                "sized risk. Approve again during market hours.",
+                intent.symbol,
+            )
         account = self.broker.get_account()
         gross, open_count = _gross_and_count(positions)
         acct_state = AccountState(
@@ -274,11 +294,10 @@ class TradeService:
         self.risk.on_order_submitted()
         self.audit.record("position_opened", symbol=intent.symbol, qty=pos.qty,
                           stop=pos.current_stop, via="trade_service")
-        closed = "" if self.broker.is_market_open() else " [market closed -- queued for next open]"
         return TradeResult(
             True, "placed",
             f"Placed (paper): BUY {final_qty} {intent.symbol} @ ~${price:,.2f}, "
-            f"stop ${pos.current_stop:,.2f}{note}{closed}",
+            f"stop ${pos.current_stop:,.2f}{note}",
             intent.symbol, qty=float(final_qty), stop=pos.current_stop,
         )
 

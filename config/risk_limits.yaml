@@ -30,11 +30,10 @@ pdt:
   min_equity_for_daytrading: 25000
   max_day_trades_rolling_5d: 3     # only enforced if equity dips below threshold
 
-connectivity:
-  heartbeat_interval_seconds: 30
-  on_disconnect: halt_new_trades   # never trade on stale data
-  retry_backoff_seconds: [1, 2, 5, 15, 30]
-  retry_hard_cap: 5                # then HALT
+# NOTE (honest config): connectivity handling is not a separate subsystem.
+# Any broker/data API failure raises and the orchestrator's default-to-halt
+# catch persists a HALT (class: exception/disconnect). Data freshness is
+# enforced via settings.yaml -> data.max_bar_age_days.
 
 # Universal ratchet-stop exit engine — parameters are PER STRATEGY.
 # See docs/STRATEGIES.md. Mean-reversion MUST stay tight (small target).
@@ -51,7 +50,7 @@ ratchet_stop:
     atr_multiple_initial: 2.0
     atr_multiple_trail: 1.5
 
-# Hybrid execution: the current stop always rests as a real order at the broker.
-backstop:
-  enabled: true
-  catastrophe_stop_pct: 15.0       # wide broker-side stop in case bot dies
+# Hybrid execution: the current stop always rests as a REAL order at the broker
+# (attached atomically on entry, ratcheted up by the bot). There is no separate
+# "catastrophe backstop" order — the resting stop IS the backstop; it protects
+# even when the bot process is dead.

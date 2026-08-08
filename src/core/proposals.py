@@ -15,11 +15,13 @@ Boundary: places orders NO, holds trading credentials NO.
 
 from __future__ import annotations
 
-import json
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+from src.common.jsonio import atomic_write_json, load_json_or_quarantine
+from src.common.logging import get_logger
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_PROPOSALS_PATH = PROJECT_ROOT / "state" / "proposals.json"
@@ -101,14 +103,15 @@ class ProposalStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def _load_raw(self) -> dict[str, dict]:
-        if not self.path.exists():
+        payload, quarantined = load_json_or_quarantine(self.path)
+        if quarantined is not None:
+            get_logger("proposals").error(
+                "proposals file corrupt; moved to %s and starting empty", quarantined)
             return {}
-        with self.path.open("r", encoding="utf-8") as fh:
-            return json.load(fh) or {}
+        return payload or {}
 
     def _save_raw(self, payload: dict[str, dict]) -> None:
-        with self.path.open("w", encoding="utf-8") as fh:
-            json.dump(payload, fh, indent=2)
+        atomic_write_json(self.path, payload)
 
     def add(self, proposal: Proposal) -> None:
         payload = self._load_raw()

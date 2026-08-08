@@ -10,9 +10,12 @@ so the decision path reaches the order API only through the risk gate.
    (`src/common/models.py`) and use `load_market_data_credentials()`. Never log secrets.
 2. Risk has veto, not authority: every order passes `src/risk/`. The sentiment/AI
    layer can shrink or block, never originate.
-3. Default to halt: on disconnect, stale data, reconcile mismatch, or unhandled
-   exception, stop and do nothing. HALT persists across runs (`state/halt.json`);
-   clear only with `run_paper --reset`.
+3. Default to halt: on disconnect, stale data (`data.max_bar_age_days`),
+   reconcile mismatch, or unhandled exception, stop and do nothing. HALT
+   persists across runs (`state/halt.json`); clear only with `run_paper
+   --reset`. State files are written atomically; corrupt ones are quarantined.
+   New entries are refused while the market is closed — everywhere, including
+   phone approvals (no overnight-queued market orders).
 4. No naked positions: every entry attaches a protective stop atomically
    (`submit_protected_entry`; bracket adds a take-profit OCO). Act on `filled_qty`.
 5. Indicators/features must be causal -- row i uses only bars <= i (no look-ahead).
@@ -57,7 +60,7 @@ logon, restart on failure") for phone control: view/approve/deny, `/ideas`,
 
 ## Status
 
-Implemented + tested (255 tests). Running autonomously on PAPER; strategies not
+Implemented + tested (268 tests). Running autonomously on PAPER; strategies not
 yet validated. Phone control + propose-and-approve via Telegram (`src/notify/`).
 Autonomous discovery (`src/discovery/`) surfaces ranked buy ideas from
 congress/technical/news/fundamentals → phone Approve/Deny. Details + open gaps in

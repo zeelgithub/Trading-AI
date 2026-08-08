@@ -11,15 +11,19 @@ data:
   timeframe: 1Day          # primary bar interval for all strategies (swing)
   feed: iex                # iex | sip  (sip = full volume, paid)
   lookback_days: 400       # enough history for the 200-day EMA + warmup
-  stale_seconds: 90        # quote older than this => treated as disconnected
+  # Freshness gate (rule 3): a symbol whose newest daily bar is older than this
+  # is skipped (entries, exits, stop updates); if EVERY symbol is stale the
+  # cycle HALTs (class stale_data, auto-resumable by the verified self-healer).
+  # 4 days tolerates a weekend + one holiday.
+  max_bar_age_days: 4
 
 universe:
   source: config/symbols.yaml   # explicit, user-specified watchlist (no scanner in v1)
 
 scheduling:
   # Daily/swing system: evaluate once near the close, act at next open.
+  # Reconciliation runs at the START of every cycle (not on its own timer).
   evaluate_at: "15:45"     # ET, just before close
-  reconcile_interval_seconds: 300
 
 logging:
   level: INFO
@@ -29,7 +33,15 @@ logging:
 alerts:
   enabled: true
   channel: telegram               # telegram | none  (token + chat ids in .env)
-  on: [halt, kill_switch, reconciliation_mismatch, fill, daily_summary]
+  on: [halt, kill_switch, reconciliation_mismatch, fill, daily_summary,
+       watchdog, self_heal, incident]
+
+watchdog:
+  # Independent probe (scripts/healthcheck.py) -- schedule it every ~15 min on
+  # weekdays. It reads local files only (no trading creds).
+  cycle_grace_minutes: 45         # missed-cycle alarm this long after evaluate_at
+  listener_max_age_seconds: 300   # Telegram listener heartbeat older => "down"
+  alert_cooldown_minutes: 360     # same issue set re-alerts at most this often
 
 approval:
   # Propose-and-approve: the bot decides and pushes trades to the phone but

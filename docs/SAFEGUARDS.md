@@ -16,12 +16,18 @@ a great strategy with no controls eventually does not. Config:
 
 ## Tier 2 — Connectivity / runtime
 
-- **Disconnect handler:** data or broker drop -> stop initiating trades (never trade on
-  stale data).
-- **Heartbeat / watchdog:** independent ping; unresponsive bot -> flatten-and-halt.
-- **Stale-data detector:** quote older than `stale_seconds` => treated as disconnected.
-- **Backoff with hard cap:** retry transient errors, then HALT rather than hammering.
-- **Graceful shutdown:** cancel working orders, persist state on SIGINT/crash.
+- **Disconnect handler:** any data/broker API failure raises and the cycle's
+  default-to-halt catch persists a HALT — the bot never keeps trading through
+  an outage.
+- **Stale-data detector:** a symbol whose newest daily bar is older than
+  `data.max_bar_age_days` is skipped for entries, exits, and stop updates; if
+  *every* checked symbol is stale the cycle HALTs (`stale_data`, auto-resumable
+  by the verified self-healer once data is fresh again).
+- **Watchdog:** `scripts/healthcheck.py` is an independent liveness check
+  (schedule it separately from the bot itself).
+- **Crash-safe state files:** all `state/*.json` writes are atomic
+  (temp + rename); a corrupt file is quarantined, never trusted — recovery goes
+  through reconciliation, which halts on anything unexpected.
 
 ## Tier 3 — Reconciliation / state integrity
 
@@ -60,8 +66,18 @@ a great strategy with no controls eventually does not. Config:
 ## Hybrid stop execution
 
 The current ratchet stop **always rests as a real order at the broker**. The bot only
-*raises* it as price climbs. If the bot crashes, the last stop stays active at Alpaca; a
-wider catastrophe stop (entry -15%) sits behind it as a backstop.
+*raises* it as price climbs. If the bot crashes, the last stop stays active at Alpaca —
+the resting stop *is* the backstop; no separate catastrophe order exists (or is needed).
+Protected entries are submitted **GTC** (never DAY): bracket/OTO legs inherit the
+parent's time-in-force, and a DAY stop leg expires at the close, which would leave a
+multi-day position naked the next morning.
+
+## Market-hours rule
+
+New entries are **refused while the market is closed** — everywhere, including
+manual `/buy` and phone approvals. A market order queued overnight would fill at
+the next open against a stop priced off the previous close, so an overnight gap
+could multiply the sized risk. Approve during regular hours instead.
 
 ## Golden rule
 

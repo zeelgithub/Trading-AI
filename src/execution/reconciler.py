@@ -91,7 +91,10 @@ class Reconciler:
                     report.auto_closed.append(symbol)
                 continue
             expected_qty = pos.filled_qty or pos.qty
-            if abs(bp.qty - expected_qty) > QTY_TOLERANCE:
+            # Compare SIGNED size so a short at the broker never reconciles
+            # against a long the bot thinks it holds (equal |qty| is not enough).
+            expected_signed = expected_qty if pos.side == Side.LONG else -expected_qty
+            if abs(self._signed(bp) - expected_signed) > QTY_TOLERANCE:
                 report.quantity_mismatches.append(symbol)
             if symbol not in stop_symbols:
                 report.unprotected_positions.append(symbol)

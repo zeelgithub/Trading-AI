@@ -75,5 +75,30 @@ def indicator_snapshot(symbol: str, *, config: Config | None = None, conn=None) 
     }
 
 
+def data_health(symbols: list[str] | None = None, *,
+                config: Config | None = None, conn=None) -> dict:
+    """Bar-cache freshness per symbol: last bar date, age in days, and whether
+    it passes the same `max_bar_age_days` gate the orchestrator enforces."""
+    from src.data.ingest import last_bar_age_days
+
+    config = config or load_config()
+    conn = conn or store.connect()
+    max_age = int(config.get("settings.data.max_bar_age_days", 4))
+    rows = []
+    for sym in symbols or config.enabled_symbols():
+        sym = sym.upper()
+        bars = store.load_bars(conn, sym)
+        age = last_bar_age_days(bars)
+        rows.append({
+            "symbol": sym,
+            "last_bar": _date(bars.index[-1]) if not bars.empty else None,
+            "age_days": age,
+            "fresh": age is not None and age <= max_age,
+        })
+    stale = [r["symbol"] for r in rows if not r["fresh"]]
+    return {"max_bar_age_days": max_age, "symbols": rows, "stale": stale,
+            "all_fresh": not stale}
+
+
 def _date(ts) -> str:
     return ts.date().isoformat() if hasattr(ts, "date") else str(ts)

@@ -21,11 +21,13 @@ Boundary: places orders NO, holds trading credentials NO.
 
 from __future__ import annotations
 
-import json
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+from src.common.jsonio import atomic_write_json, load_json_or_quarantine
+from src.common.logging import get_logger
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_STATE_PATH = PROJECT_ROOT / "state" / "rotation.json"
@@ -73,14 +75,16 @@ class RotationStateStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def load(self) -> RotationState:
-        if not self.path.exists():
+        payload, quarantined = load_json_or_quarantine(self.path)
+        if quarantined is not None:
+            get_logger("rotation").error(
+                "rotation state corrupt; moved to %s -- reverting to all-enabled default",
+                quarantined)
             return RotationState()
-        with self.path.open("r", encoding="utf-8") as fh:
-            return RotationState(strategies=json.load(fh) or {})
+        return RotationState(strategies=payload or {})
 
     def save(self, state: RotationState) -> None:
-        with self.path.open("w", encoding="utf-8") as fh:
-            json.dump(state.strategies, fh, indent=2)
+        atomic_write_json(self.path, state.strategies)
 
 
 # --- pending proposals -------------------------------------------------------
@@ -126,14 +130,15 @@ class RotationProposalStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def _load_raw(self) -> dict[str, dict]:
-        if not self.path.exists():
+        payload, quarantined = load_json_or_quarantine(self.path)
+        if quarantined is not None:
+            get_logger("rotation").error(
+                "rotation proposals corrupt; moved to %s and starting empty", quarantined)
             return {}
-        with self.path.open("r", encoding="utf-8") as fh:
-            return json.load(fh) or {}
+        return payload or {}
 
     def _save_raw(self, payload: dict[str, dict]) -> None:
-        with self.path.open("w", encoding="utf-8") as fh:
-            json.dump(payload, fh, indent=2)
+        atomic_write_json(self.path, payload)
 
     def add(self, proposal: RotationProposal) -> None:
         payload = self._load_raw()
