@@ -60,7 +60,7 @@ logon, restart on failure") for phone control: view/approve/deny, `/ideas`,
 
 ## Status
 
-Implemented + tested (268 tests). Running autonomously on PAPER; strategies not
+Implemented + tested (318 tests). Running autonomously on PAPER; strategies not
 yet validated. Phone control + propose-and-approve via Telegram (`src/notify/`).
 Autonomous discovery (`src/discovery/`) surfaces ranked buy ideas from
 congress/technical/news/fundamentals → phone Approve/Deny. Details + open gaps in

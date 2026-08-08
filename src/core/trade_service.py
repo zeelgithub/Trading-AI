@@ -20,16 +20,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
+from pathlib import Path
 from typing import Callable
 
 from src.common.config import Config, load_config
 from src.common.logging import AuditLog, get_logger
 from src.common.models import Action, Decision, Intent, RiskDecision, Side
+from src.common.proclock import DEFAULT_LOCK_PATH, BotBusy, bot_lock
 from src.core.proposals import Proposal
 from src.core.state_store import HaltClass, HaltStore, StateStore
 from src.core.symbols import ResolveResult, SymbolResolver
 from src.execution.broker_alpaca import BrokerInterface
-from src.execution.order_manager import OrderManager, PositionStatus
+from src.execution.order_manager import OrderManager, PositionStatus, is_dead_entry
 from src.risk.ratchet_stop import PercentRatchet, build_ratchet
 from src.risk.risk_manager import AccountState, RiskManager
 
@@ -99,6 +101,7 @@ class TradeService:
         price_fn: PriceFn | None = None,
         audit: AuditLog | None = None,
         symbol_resolver: SymbolResolver | None = None,
+        lock_path: "str | Path | None" = None,
     ) -> None:
         self.broker = broker
         self.config = config or load_config()
@@ -110,11 +113,31 @@ class TradeService:
         self.audit = audit or AuditLog()
         self.symbols = symbol_resolver or SymbolResolver(broker)
         self.log = get_logger("trade_service")
+        # How long a phone action waits for the cross-process state lock (vs a
+        # scheduled cycle) before telling the user to retry.
+        self.action_lock_timeout = float(
+            self.config.get("settings.concurrency.action_lock_timeout_seconds", 15))
+        # Injectable (like state_store/halt_store) so tests never contend with
+        # a real bot's lock file; defaults to the real state/.bot.lock.
+        self.lock_path = lock_path or DEFAULT_LOCK_PATH
 
     def resolve_symbol(self, query: str) -> ResolveResult:
         """Resolve free-form text to a validated tradable ticker (or an honest
         ambiguous/none) against the broker's cached asset catalog."""
         return self.symbols.resolve(query)
+
+    def _locked(self, action: Callable[[], TradeResult]) -> TradeResult:
+        """Run `action` holding the cross-process state lock (shared with the
+        scheduled Orchestrator cycle and self-heal) so a phone action can never
+        race a save against them. On contention, fail fast with a clear
+        message instead of corrupting state or hanging the listener."""
+        try:
+            with bot_lock(timeout=self.action_lock_timeout, path=self.lock_path):
+                return action()
+        except BotBusy:
+            return TradeResult(
+                False, "busy",
+                "Bot is busy with a scheduled cycle -- try again in a few seconds.")
 
     # --- read / control ---
     def status(self) -> StatusReport:
@@ -142,102 +165,117 @@ class TradeService:
         )
 
     def halt(self, reason: str = "manual halt") -> TradeResult:
-        self.halt_store.set(reason, HaltClass.MANUAL)
-        self.audit.record("manual_halt", reason=reason)
-        return TradeResult(True, "ok", f"HALTED: {reason}")
+        def _do() -> TradeResult:
+            self.halt_store.set(reason, HaltClass.MANUAL)
+            self.audit.record("manual_halt", reason=reason)
+            return TradeResult(True, "ok", f"HALTED: {reason}")
+        return self._locked(_do)
 
     def reset(self) -> TradeResult:
-        self.halt_store.clear()
-        self.audit.record("manual_reset")
-        return TradeResult(True, "ok", "Halt cleared -- bot reset to IDLE.")
+        def _do() -> TradeResult:
+            self.halt_store.clear()
+            self.audit.record("manual_reset")
+            return TradeResult(True, "ok", "Halt cleared -- bot reset to IDLE.")
+        return self._locked(_do)
 
     def close(self, symbol: str) -> TradeResult:
         symbol = symbol.upper()
-        positions = self.store.load()
-        pos = positions.get(symbol)
-        if pos is None or pos.status == PositionStatus.CLOSED:
-            return TradeResult(False, "none", f"No managed {symbol} position to close.", symbol)
-        try:
-            self.orders.close(pos, "manual_close")
-        except Exception as exc:
-            return TradeResult(False, "error", f"Close failed at broker: {exc}", symbol)
-        del positions[symbol]
-        self.store.save(positions)
-        self.audit.record("manual_close", symbol=symbol)
-        return TradeResult(True, "closed", f"Closed {symbol}.", symbol)
+
+        def _do() -> TradeResult:
+            positions = self.store.load()
+            pos = positions.get(symbol)
+            if pos is None or pos.status == PositionStatus.CLOSED:
+                return TradeResult(False, "none", f"No managed {symbol} position to close.", symbol)
+            try:
+                self.orders.close(pos, "manual_close")
+            except Exception as exc:
+                return TradeResult(False, "error", f"Close failed at broker: {exc}", symbol)
+            del positions[symbol]
+            self.store.save(positions)
+            self.audit.record("manual_close", symbol=symbol)
+            return TradeResult(True, "closed", f"Closed {symbol}.", symbol)
+        return self._locked(_do)
 
     def flatten(self) -> TradeResult:
-        positions = self.store.load()
-        live = [s for s, p in positions.items() if p.status != PositionStatus.CLOSED]
-        if not live:
-            return TradeResult(True, "none", "No open positions to flatten.")
-        errors = []
-        for symbol in list(live):
-            try:
-                self.orders.close(positions[symbol], "manual_flatten")
-                del positions[symbol]
-            except Exception as exc:
-                errors.append(f"{symbol}: {exc}")
-        self.store.save(positions)
-        self.audit.record("manual_flatten", closed=len(live) - len(errors), errors=errors)
-        if errors:
-            return TradeResult(False, "error", "Flatten partial: " + "; ".join(errors))
-        return TradeResult(True, "closed", f"Flattened {len(live)} position(s).")
+        def _do() -> TradeResult:
+            positions = self.store.load()
+            live = [s for s, p in positions.items() if p.status != PositionStatus.CLOSED]
+            if not live:
+                return TradeResult(True, "none", "No open positions to flatten.")
+            errors = []
+            for symbol in list(live):
+                try:
+                    self.orders.close(positions[symbol], "manual_flatten")
+                    del positions[symbol]
+                except Exception as exc:
+                    errors.append(f"{symbol}: {exc}")
+            self.store.save(positions)
+            self.audit.record("manual_flatten", closed=len(live) - len(errors), errors=errors)
+            if errors:
+                return TradeResult(False, "error", "Flatten partial: " + "; ".join(errors))
+            return TradeResult(True, "closed", f"Flattened {len(live)} position(s).")
+        return self._locked(_do)
 
     # --- order paths (gated) ---
     def place_manual(self, symbol: str, qty: int, stop_pct: float = 10.0) -> TradeResult:
         symbol = symbol.upper()
-        halted = self.halt_store.is_halted()
-        if halted:
-            return TradeResult(False, "halted", f"Bot is HALTED ({halted}). /reset first.", symbol)
 
-        positions = self.store.load()
-        if symbol in positions and positions[symbol].status != PositionStatus.CLOSED:
-            return TradeResult(False, "exists", f"Already tracking {symbol} "
-                               f"({positions[symbol].status.value}).", symbol)
+        def _do() -> TradeResult:
+            halted = self.halt_store.is_halted()
+            if halted:
+                return TradeResult(False, "halted", f"Bot is HALTED ({halted}). /reset first.", symbol)
 
-        try:
-            price = self._last_price(symbol)
-        except Exception as exc:
-            return TradeResult(False, "error", str(exc), symbol)
-        stop = round(price * (1 - stop_pct / 100.0), 2)
-        intent = Intent(
-            symbol=symbol, strategy="manual", side=Side.LONG, action=Action.BUY,
-            confidence=1.0, entry_price=round(price, 2), stop_loss=stop,
-            suggested_qty=float(qty),
-        )
-        intent.validate()
-        ratchet = PercentRatchet(entry=price, side=Side.LONG, initial_stop_pct=stop_pct)
-        return self._gate_and_open(intent, positions, price, requested_qty=qty,
-                                   ratchet=ratchet, tag=f"manual-{date.today().isoformat()}")
+            positions = self.store.load()
+            if symbol in positions and positions[symbol].status != PositionStatus.CLOSED:
+                return TradeResult(False, "exists", f"Already tracking {symbol} "
+                                   f"({positions[symbol].status.value}).", symbol)
+
+            try:
+                price = self._last_price(symbol)
+            except Exception as exc:
+                return TradeResult(False, "error", str(exc), symbol)
+            stop = round(price * (1 - stop_pct / 100.0), 2)
+            intent = Intent(
+                symbol=symbol, strategy="manual", side=Side.LONG, action=Action.BUY,
+                confidence=1.0, entry_price=round(price, 2), stop_loss=stop,
+                suggested_qty=float(qty),
+            )
+            intent.validate()
+            ratchet = PercentRatchet(entry=price, side=Side.LONG, initial_stop_pct=stop_pct)
+            return self._gate_and_open(intent, positions, price, requested_qty=qty,
+                                       ratchet=ratchet, tag=f"manual-{date.today().isoformat()}")
+        return self._locked(_do)
 
     def execute_approved(self, proposal: Proposal) -> TradeResult:
         """Place a previously-proposed trade -- only after re-running the risk
         gate with fresh account state."""
         symbol = proposal.symbol
-        halted = self.halt_store.is_halted()
-        if halted:
-            return TradeResult(False, "halted", f"Bot is HALTED ({halted}). /reset first.", symbol)
 
-        positions = self.store.load()
-        if symbol in positions and positions[symbol].status != PositionStatus.CLOSED:
-            return TradeResult(False, "exists", f"Already tracking {symbol}.", symbol)
+        def _do() -> TradeResult:
+            halted = self.halt_store.is_halted()
+            if halted:
+                return TradeResult(False, "halted", f"Bot is HALTED ({halted}). /reset first.", symbol)
 
-        try:
-            intent = Intent.from_dict(proposal.intent)
-        except ValueError as exc:
-            return TradeResult(False, "error", f"Bad proposal: {exc}", symbol)
+            positions = self.store.load()
+            if symbol in positions and positions[symbol].status != PositionStatus.CLOSED:
+                return TradeResult(False, "exists", f"Already tracking {symbol}.", symbol)
 
-        try:
-            entry = self._last_price(symbol)  # always current price, not stale proposal price
-        except Exception as exc:
-            return TradeResult(False, "error", str(exc), symbol)
-        ratchet = self._rebuild_ratchet(intent, proposal, entry)
-        return self._gate_and_open(
-            intent, positions, entry,
-            requested_qty=int(proposal.approved_qty),
-            ratchet=ratchet, tag=f"approved-{proposal.id}",
-        )
+            try:
+                intent = Intent.from_dict(proposal.intent)
+            except ValueError as exc:
+                return TradeResult(False, "error", f"Bad proposal: {exc}", symbol)
+
+            try:
+                entry = self._last_price(symbol)  # always current price, not stale proposal price
+            except Exception as exc:
+                return TradeResult(False, "error", str(exc), symbol)
+            ratchet = self._rebuild_ratchet(intent, proposal, entry)
+            return self._gate_and_open(
+                intent, positions, entry,
+                requested_qty=int(proposal.approved_qty),
+                ratchet=ratchet, tag=f"approved-{proposal.id}",
+            )
+        return self._locked(_do)
 
     # --- internals ---
     def _gate_and_open(self, intent, positions, price, requested_qty, ratchet, tag) -> TradeResult:
@@ -288,6 +326,15 @@ class TradeService:
             self.orders.settle(pos)
         except Exception as exc:
             return TradeResult(False, "error", f"Order failed at broker: {exc}", intent.symbol)
+
+        if is_dead_entry(pos):
+            self.audit.record("order_rejected", symbol=intent.symbol,
+                              broker_status=pos.last_order_status, via="trade_service")
+            return TradeResult(
+                False, "rejected",
+                f"Order rejected by broker (status: {pos.last_order_status}).",
+                intent.symbol,
+            )
 
         positions[intent.symbol] = pos
         self.store.save(positions)

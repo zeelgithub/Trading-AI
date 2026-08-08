@@ -53,11 +53,11 @@ def test_watchdog_detects_missed_cycle():
     assert [i.kind for i in issues] == ["missed_cycle"]
 
 
-def test_watchdog_no_missed_cycle_before_grace_or_on_weekend():
+def test_watchdog_no_missed_cycle_before_grace_or_on_non_trading_day():
     facts = {**HEALTHY, "last_cycle_ts": None}
     assert evaluate_health(now_et=_et("2026-08-07 16:29"), **facts) == []  # within grace
-    weekend = {**facts, "heartbeat_ts": _utc_iso("2026-08-08 12:00")}
-    assert evaluate_health(now_et=_et("2026-08-08 12:01"), **weekend) == []  # Saturday
+    non_trading = {**facts, "heartbeat_ts": _utc_iso("2026-08-08 12:00"), "is_trading_day": False}
+    assert evaluate_health(now_et=_et("2026-08-08 12:01"), **non_trading) == []  # weekend/holiday
 
 
 def test_watchdog_detects_dead_listener():

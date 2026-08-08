@@ -198,7 +198,7 @@ def build_notifier(config: Config) -> "Notifier | NullNotifier":
     if not creds.configured or not creds.allowed_chat_ids or not enabled:
         return NullNotifier()
 
-    events = config.get("settings.alerts.on", None)
+    events = config.get("settings.alerts.events", None)
     return Notifier(
         client=TelegramClient(creds),
         chat_ids=list(creds.allowed_chat_ids),

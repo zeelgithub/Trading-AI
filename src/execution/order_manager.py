@@ -27,6 +27,14 @@ class PositionStatus(str, Enum):
     CLOSED = "closed"
 
 
+# Terminal broker statuses that mean "this order will never fill." Distinct
+# from PENDING (still working) and from a real fill. Without checking for
+# these, a rejected/canceled/expired entry sat in PENDING_ENTRY until the NEXT
+# reconcile pass caught it as "pending_lost" -- a real halt, but with the
+# broker's actual rejection reason never captured anywhere in the audit trail.
+DEAD_ORDER_STATUSES = frozenset({"rejected", "canceled", "expired", "suspended", "stopped"})
+
+
 @dataclass
 class ManagedPosition:
     symbol: str
@@ -41,6 +49,15 @@ class ManagedPosition:
     filled_qty: float = 0.0
     tp_order_id: str | None = None
     take_profit: float | None = None
+    last_order_status: str | None = None  # broker's raw status, for diagnostics
+
+
+def is_dead_entry(position: "ManagedPosition") -> bool:
+    """True when a PENDING_ENTRY settled to CLOSED with zero fill -- the
+    broker rejected/canceled/expired it rather than it ever opening."""
+    return (position.status == PositionStatus.CLOSED
+            and not position.filled_qty
+            and position.last_order_status in DEAD_ORDER_STATUSES)
 
 
 def _coid(symbol: str, strategy: str, tag: str, kind: str) -> str:
@@ -100,11 +117,21 @@ class OrderManager:
         )
 
     def settle(self, position: ManagedPosition) -> PositionStatus:
-        """Refresh fill state from the broker. Acts on filled_qty, not ordered."""
+        """Refresh fill state from the broker. Acts on filled_qty, not ordered.
+
+        A dead order (rejected/canceled/expired/...) with zero fill settles to
+        CLOSED rather than sitting in PENDING_ENTRY -- `is_dead_entry()` lets
+        the caller tell this apart from a real close and audit the reason
+        immediately, instead of waiting for the next reconcile pass to notice
+        the order vanished and halt on an unexplained "pending_lost".
+        """
         order = self.broker.get_order(position.entry_order_id)
         position.filled_qty = order.filled_qty
+        position.last_order_status = order.status
         if order.filled_qty and order.filled_qty > 0:
             position.status = PositionStatus.OPEN
+        elif order.status in DEAD_ORDER_STATUSES:
+            position.status = PositionStatus.CLOSED
         return position.status
 
     def raise_stop(self, position: ManagedPosition, price: float, atr: float | None = None) -> bool:

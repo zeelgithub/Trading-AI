@@ -33,15 +33,37 @@ logging:
 alerts:
   enabled: true
   channel: telegram               # telegram | none  (token + chat ids in .env)
-  on: [halt, kill_switch, reconciliation_mismatch, fill, daily_summary,
-       watchdog, self_heal, incident]
+  # NOTE: named `events`, not `on` -- YAML 1.1 parses a bare `on:` key as the
+  # boolean True (same footgun as on/off/yes/no), which silently broke this
+  # filter (config.get("...alerts.on") always missed, so every event type
+  # was sent regardless of this list). Confirmed via yaml.safe_load().
+  events: [halt, kill_switch, reconciliation_mismatch, fill, daily_summary,
+           watchdog, self_heal, incident]
 
 watchdog:
   # Independent probe (scripts/healthcheck.py) -- schedule it every ~15 min on
-  # weekdays. It reads local files only (no trading creds).
+  # weekdays. It reads local files only (no trading creds). Missed-cycle
+  # checks only fire on real NYSE trading sessions (pandas-market-calendars,
+  # computed locally -- no false alarms on market holidays).
   cycle_grace_minutes: 45         # missed-cycle alarm this long after evaluate_at
   listener_max_age_seconds: 300   # Telegram listener heartbeat older => "down"
   alert_cooldown_minutes: 360     # same issue set re-alerts at most this often
+
+self_heal:
+  # Gates for scripts/run_self_heal.py's verified auto-resume (stale_data /
+  # disconnect only -- see src/core/self_heal.py). Read from here instead of
+  # code defaults so the operating parameters are visible/reviewable.
+  cooldown_seconds: 300           # minimum time since the halt before resuming
+  max_per_day: 3                  # auto-resumes per UTC day, then manual only
+
+concurrency:
+  # The always-on Telegram listener and the scheduled paper-trading cycle both
+  # read-modify-write state/positions.json and state/halt.json; a file lock
+  # (state/.bot.lock) serializes them. Timeouts bound how long each side waits
+  # for the other before giving up (cycle: skip silently; phone action: tell
+  # the user to retry) rather than corrupting state or hanging forever.
+  cycle_lock_timeout_seconds: 60
+  action_lock_timeout_seconds: 15
 
 approval:
   # Propose-and-approve: the bot decides and pushes trades to the phone but

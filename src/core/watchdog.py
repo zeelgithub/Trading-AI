@@ -51,19 +51,26 @@ def evaluate_health(
     heartbeat_ts: str | None = None,
     listener_max_age_seconds: int = 300,
     stale_symbols: list[str] | None = None,
+    is_trading_day: bool = True,
 ) -> list[HealthIssue]:
-    """Evaluate bot health from already-gathered facts. Returns [] if healthy."""
+    """Evaluate bot health from already-gathered facts. Returns [] if healthy.
+
+    `is_trading_day` should come from a real exchange calendar (see
+    scripts/healthcheck.py) -- a bare weekday check would false-alarm
+    "missed_cycle" on every NYSE holiday that falls Mon-Fri.
+    """
     issues: list[HealthIssue] = []
 
     if halt:
         issues.append(HealthIssue(
             "halted", f"bot is HALTED ({halt.get('class')}): {halt.get('reason')}"))
 
-    # Missed cycle: on a weekday, once evaluate_at + grace has passed, a
-    # cycle_complete must exist with today's (ET) date at/after evaluate_at.
+    # Missed cycle: on a real trading day, once evaluate_at + grace has
+    # passed, a cycle_complete must exist with today's (ET) date at/after
+    # evaluate_at.
     hh, mm = (int(x) for x in evaluate_at.split(":"))
     deadline = now_et.normalize() + pd.Timedelta(hours=hh, minutes=mm + cycle_grace_minutes)
-    if now_et.weekday() < 5 and now_et >= deadline:
+    if is_trading_day and now_et >= deadline:
         expected_after = now_et.normalize() + pd.Timedelta(hours=hh, minutes=mm)
         last = _parse_ts(last_cycle_ts)
         ran_today = last is not None and last.tz_convert(ET) >= expected_after

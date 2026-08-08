@@ -9,11 +9,13 @@ pandas>=2.0
 numpy>=1.26
 pandas-ta>=0.3.14b        # EMA, RSI, ATR, ADX, Bollinger Bands
 yfinance>=0.2.40         # free, coarse fundamentals for discovery (Phase C; optional)
+pandas-market-calendars>=4.3   # NYSE holiday calendar, computed locally (watchdog)
 
 # Config & env
 PyYAML>=6.0
 python-dotenv>=1.0
 pydantic>=2.0             # typed config / message models
+filelock>=3.13            # cross-process lock: listener vs scheduled cycle vs self-heal
 
 # Storage
 # (stdlib sqlite3 for v1; consider duckdb later)

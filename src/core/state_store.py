@@ -120,6 +120,7 @@ class StateStore:
             "filled_qty": p.filled_qty,
             "tp_order_id": p.tp_order_id,
             "take_profit": p.take_profit,
+            "last_order_status": p.last_order_status,
             "ratchet": p.ratchet.state(),
         }
 
@@ -138,4 +139,5 @@ class StateStore:
             filled_qty=d.get("filled_qty", 0.0),
             tp_order_id=d.get("tp_order_id"),
             take_profit=d.get("take_profit"),
+            last_order_status=d.get("last_order_status"),
         )

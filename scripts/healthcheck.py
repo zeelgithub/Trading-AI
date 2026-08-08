@@ -44,6 +44,24 @@ def _heartbeat_ts() -> str | None:
     return payload.get("ts") if isinstance(payload, dict) else None
 
 
+def _is_trading_day(today) -> bool:
+    """True if `today` is a real NYSE trading session, via pandas-market-
+    calendars -- computed locally (no network, no creds), so July 4th,
+    Thanksgiving, etc. don't false-alarm a missed_cycle alert. Degrades to a
+    plain weekday check if the calendar lookup fails for any reason (missing
+    package, internal error) -- never let a calendar hiccup silence or crash
+    the watchdog."""
+    try:
+        import pandas_market_calendars as mcal
+
+        nyse = mcal.get_calendar("NYSE")
+        sched = nyse.schedule(start_date=today, end_date=today)
+        return not sched.empty
+    except Exception as exc:  # pragma: no cover - defensive fallback
+        log.warning("NYSE calendar lookup failed (%s) -- falling back to weekday check", exc)
+        return today.weekday() < 5
+
+
 def _should_alert(fingerprint: str, now_utc: pd.Timestamp, cooldown_minutes: int) -> bool:
     """Alert when the issue set changed, or the cooldown for the same set passed."""
     payload, _ = load_json_or_quarantine(WATCHDOG_STATE_PATH)
@@ -73,9 +91,10 @@ def main() -> int:
         log.warning("data_health failed: %s", exc)
         stale = ["<data cache unreadable>"]
 
+    now_et = pd.Timestamp.now(tz=ET)
     last_cycle = ops.get("last_cycle") or {}
     issues = evaluate_health(
-        now_et=pd.Timestamp.now(tz=ET),
+        now_et=now_et,
         halt=ops.get("halt"),
         last_cycle_ts=last_cycle.get("ts"),
         evaluate_at=str(config.get("settings.scheduling.evaluate_at", "15:45")),
@@ -83,6 +102,7 @@ def main() -> int:
         heartbeat_ts=_heartbeat_ts(),
         listener_max_age_seconds=int(wd.get("listener_max_age_seconds", 300)),
         stale_symbols=stale,
+        is_trading_day=_is_trading_day(now_et.date()),
     )
 
     if not issues:

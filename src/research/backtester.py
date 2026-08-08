@@ -73,11 +73,19 @@ class Backtester:
         self,
         config: Config | None = None,
         initial_equity: float = 100_000.0,
-        commission_per_share: float = 0.0,
-        slippage_bps: float = 1.0,
+        commission_per_share: float | None = None,
+        slippage_bps: float | None = None,
     ) -> None:
         self.config = config or load_config()
         self.initial_equity = initial_equity
+        # None (the default) reads settings.backtest.* so cost assumptions live
+        # in one reviewable place instead of a silent code default -- explicit
+        # args still override, for one-off cost-sensitivity experiments.
+        if commission_per_share is None:
+            commission_per_share = float(
+                self.config.get("settings.backtest.commission_per_share", 0.0))
+        if slippage_bps is None:
+            slippage_bps = float(self.config.get("settings.backtest.slippage_bps", 5.0))
         self.commission = commission_per_share
         self.slip = slippage_bps / 10_000.0
 

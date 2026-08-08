@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Callable
 
 from src.common.logging import get_logger
+from src.common.proclock import DEFAULT_LOCK_PATH, BotBusy, bot_lock
 from src.core.state_store import HaltClass, HaltStore
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -86,8 +87,13 @@ class SelfHealer:
         notifier=None,
         audit=None,
         now: Callable[[], datetime] | None = None,
+        lock_timeout: float = 15.0,
+        lock_path: "str | Path | None" = None,
     ) -> None:
         self.halt_store = halt_store or HaltStore()
+        # Injectable (like counter_path/halt_store) so tests never contend
+        # with a real bot's lock file; defaults to the real state/.bot.lock.
+        self.lock_path = lock_path or DEFAULT_LOCK_PATH
         self.verifiers = dict(verifiers or {})
         self.cooldown_seconds = int(cooldown_seconds)
         self.max_per_day = int(max_per_day)
@@ -95,6 +101,7 @@ class SelfHealer:
         self.notifier = notifier
         self.audit = audit
         self._now = now or (lambda: datetime.now(timezone.utc))
+        self.lock_timeout = float(lock_timeout)
         self.log = get_logger("self_heal")
 
     def attempt_resume(self) -> ResumeResult:
@@ -124,8 +131,22 @@ class SelfHealer:
         if not cleared:
             return ResumeResult(False, hc, "fault has not cleared yet")
 
-        # Every gate passed -> deterministically clear the halt.
-        self.halt_store.clear()
+        # Every gate passed -> clear the halt, but only if it's still the SAME
+        # halt just verified: a fresh /halt could have raced in during
+        # verification (which may call the broker and take a moment). The
+        # compare-and-clear runs under the same cross-process lock TradeService
+        # and Orchestrator use, so this can't interleave with a phone action.
+        try:
+            with bot_lock(timeout=self.lock_timeout, path=self.lock_path):
+                current = self.halt_store.halt_info()
+                if current != info:
+                    return ResumeResult(
+                        False, hc, "halt changed during verification -- not resuming",
+                        escalate=True)
+                self.halt_store.clear()
+        except BotBusy:
+            return ResumeResult(False, hc, "state busy -- will retry next tick")
+
         self.counter.increment()
         self._audit(hc, info.get("reason"))
         self._notify(f"✅ Auto-resumed: {hc} cleared and verified. Send /halt to stop again.")

@@ -28,7 +28,7 @@ from src.notify.telegram import build_notifier
 log = get_logger("self_heal")
 
 
-def _data_is_fresh(symbols, max_age_days: int = 4) -> bool:
+def _data_is_fresh(symbols, max_age_days: int) -> bool:
     """True if every enabled symbol has a recent bar in the local cache."""
     if not symbols:
         return False
@@ -61,13 +61,20 @@ def main() -> None:
     config = load_config()
     notifier = build_notifier(config)
     symbols = config.enabled_symbols()
+    # Same threshold the orchestrator halts on (settings.data.max_bar_age_days)
+    # -- this used to be a separately hardcoded "4" that could silently drift
+    # from the halt condition it's supposed to verify has cleared.
+    max_bar_age_days = int(config.get("settings.data.max_bar_age_days", 4))
 
     healer = SelfHealer(
         HaltStore(),
         verifiers={
-            HaltClass.STALE_DATA: lambda: _data_is_fresh(symbols),
+            HaltClass.STALE_DATA: lambda: _data_is_fresh(symbols, max_bar_age_days),
             HaltClass.DISCONNECT: _broker_reachable,
         },
+        cooldown_seconds=int(config.get("settings.self_heal.cooldown_seconds", 300)),
+        max_per_day=int(config.get("settings.self_heal.max_per_day", 3)),
+        lock_timeout=float(config.get("settings.concurrency.action_lock_timeout_seconds", 15)),
         notifier=notifier,
         audit=AuditLog(),
     )

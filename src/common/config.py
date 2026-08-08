@@ -16,6 +16,8 @@ from typing import Any
 
 import yaml
 
+from src.common.config_schema import validate_config
+
 # Project root = two levels up from this file (src/common/config.py -> repo root).
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_DIR = PROJECT_ROOT / "config"
@@ -67,11 +69,20 @@ class Config:
 
 @lru_cache(maxsize=1)
 def load_config(config_dir: str | None = None) -> Config:
-    """Load all config files once (cached). Pass config_dir to override."""
+    """Load all config files once (cached). Pass config_dir to override.
+
+    Validates settings.yaml and risk_limits.yaml against config_schema before
+    returning: a misspelled key falling back to a silent default, or a
+    wrong-type/out-of-range value crashing deep inside RiskManager, both
+    become one clear ConfigError here instead -- before any trading logic runs.
+    """
     base = Path(config_dir) if config_dir else CONFIG_DIR
+    settings = _load_yaml(base / "settings.yaml")
+    risk_limits = _load_yaml(base / "risk_limits.yaml")
+    validate_config(settings, risk_limits)
     return Config(
-        settings=_load_yaml(base / "settings.yaml"),
-        risk_limits=_load_yaml(base / "risk_limits.yaml"),
+        settings=settings,
+        risk_limits=risk_limits,
         strategies=_load_yaml(base / "strategies.yaml"),
         symbols=_load_yaml(base / "symbols.yaml"),
     )

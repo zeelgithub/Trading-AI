@@ -28,6 +28,7 @@ import pandas as pd
 from src.common.config import Config, load_config
 from src.common.errors import is_transient_error, retry_transient
 from src.common.logging import AuditLog, get_logger
+from src.common.proclock import DEFAULT_LOCK_PATH, BotBusy, bot_lock
 from src.common.models import Decision, Side
 from src.core.proposals import Proposal
 from src.core.rotation import RotationState, RotationStateStore
@@ -35,7 +36,7 @@ from src.core.state_machine import State, StateMachine
 from src.core.state_store import HaltClass, HaltStore, StateStore
 from src.execution.broker_alpaca import BrokerInterface
 from src.notify.telegram import NullNotifier
-from src.execution.order_manager import OrderManager, PositionStatus, realized_pnl
+from src.execution.order_manager import OrderManager, PositionStatus, is_dead_entry, realized_pnl
 from src.execution.reconciler import Reconciler
 from src.research.scoreboard import Scoreboard
 from src.risk.ratchet_stop import build_ratchet
@@ -90,6 +91,7 @@ class Orchestrator:
         notifier=None,
         rotation_store: RotationStateStore | None = None,
         scoreboard: Scoreboard | None = None,
+        lock_path=None,
     ) -> None:
         self.config = config or load_config()
         self.broker = broker
@@ -103,6 +105,13 @@ class Orchestrator:
 
         # Never trade on stale data (rule 3): bars older than this are unusable.
         self.max_bar_age_days = int(self.config.get("settings.data.max_bar_age_days", 4))
+        # How long to wait for the cross-process state lock (vs a concurrent
+        # phone action) before skipping this cycle quietly.
+        self.cycle_lock_timeout = float(
+            self.config.get("settings.concurrency.cycle_lock_timeout_seconds", 60))
+        # Injectable (like state_store/halt_store) so tests never contend with
+        # a real bot's lock file; defaults to the real state/.bot.lock.
+        self.lock_path = lock_path or DEFAULT_LOCK_PATH
         self.regime = RegimeFilter(self.config)
         self.sentiment = SentimentGate(self.config, scorer=scorer)
         # Config-driven: every registered strategy with a strategies.yaml block.
@@ -146,96 +155,110 @@ class Orchestrator:
             return report
 
         try:
-            self.state.to(State.RUNNING)
-            # Ride out brief network blips; a persistent outage still raises and
-            # halts as DISCONNECT below (auto-resumable once verified back).
-            account = retry_transient(self.broker.get_account)
+            # The always-on listener (phone actions) and this scheduled cycle
+            # both read-modify-write state/positions.json and halt.json; hold
+            # the cross-process lock for the whole cycle so neither can clobber
+            # the other's save. BotBusy (below) means a phone action is mid-
+            # flight -- skip this run quietly rather than race it.
+            with bot_lock(timeout=self.cycle_lock_timeout, path=self.lock_path):
+                self.state.to(State.RUNNING)
+                # Ride out brief network blips; a persistent outage still raises
+                # and halts as DISCONNECT below (auto-resumable once verified back).
+                account = retry_transient(self.broker.get_account)
 
-            # 0. Settle pending fills so reconcile + sizing act on filled_qty.
-            if self.execute:
-                self._settle_pending()
-
-            # 1. Reconcile -- broker is source of truth (pending-aware).
-            rec = self.reconciler.reconcile(self.positions)
-            # Sync positions closed at broker (stop fired / external close) so they
-            # don't trigger a halt-level mismatch on the next check.
-            for sym in rec.auto_closed:
-                if sym in self.positions:
-                    if self.execute:  # stop fired / external close -> stop level is the exit proxy
-                        self._record_attribution(self.positions[sym], self.positions[sym].current_stop)
-                    self.positions[sym].status = PositionStatus.CLOSED
-                    self.audit.record("auto_closed", symbol=sym,
-                                      detail="position gone from broker (stop fired or external close)")
-                    self._notify("fill", f"{sym} closed at broker (stop fired or external close)")
-                    self.log.info("auto-closed %s: gone from broker", sym)
-            if not rec.ok:
-                self.audit.record("reconcile_mismatch", detail=rec.summary())
-                self._halt(report, f"reconcile mismatch: {rec.summary()}",
-                           HaltClass.RECONCILE_MISMATCH)
-                return report
-            report.reconciled = True
-
-            # 2. Kill switch.
-            ks = self.risk.breakers.check_daily_loss(account.last_equity, account.equity)
-            if not ks.ok:
-                self.audit.record("kill_switch", detail=ks.reason)
+                # 0. Settle pending fills so reconcile + sizing act on filled_qty.
                 if self.execute:
-                    self._flatten()
-                self._halt(report, f"kill switch: {ks.reason}", HaltClass.KILL_SWITCH)
-                return report
+                    self._settle_pending()
 
-            market_open = retry_transient(self.broker.is_market_open)
+                # 1. Reconcile -- broker is source of truth (pending-aware).
+                rec = self.reconciler.reconcile(self.positions)
+                # Sync positions closed at broker (stop fired / external close) so
+                # they don't trigger a halt-level mismatch on the next check.
+                for sym in rec.auto_closed:
+                    if sym in self.positions:
+                        if self.execute:  # stop fired / external close -> stop level is the exit proxy
+                            self._record_attribution(self.positions[sym], self.positions[sym].current_stop)
+                        self.positions[sym].status = PositionStatus.CLOSED
+                        self.audit.record("auto_closed", symbol=sym,
+                                          detail="position gone from broker (stop fired or external close)")
+                        self._notify("fill", f"{sym} closed at broker (stop fired or external close)")
+                        self.log.info("auto-closed %s: gone from broker", sym)
+                if not rec.ok:
+                    self.audit.record("reconcile_mismatch", detail=rec.summary())
+                    self._halt(report, f"reconcile mismatch: {rec.summary()}",
+                               HaltClass.RECONCILE_MISMATCH)
+                    return report
+                report.reconciled = True
 
-            # 3. Raise resting stops (safe even when closed -- trails the stop).
-            self._raise_stops(report)
-
-            # 4. Signal exits + new entries only place orders when the market is
-            #    open (market entries/closes are rejected outside RTH).
-            if not market_open:
-                self.log.info("market closed -- stops managed, no entries/exits")
-                report.skipped.append(("*", "market closed"))
-            else:
-                # Signal-driven exits (e.g. opposite-EMA break).
-                self._evaluate_exits(report)
-
-                # Generate / size / (optionally) execute new entries.
-                for symbol in self.config.enabled_symbols():
-                    held = self.positions.get(symbol)
-                    if held is not None and held.status != PositionStatus.CLOSED:
-                        continue
-                    try:
-                        self._consider_entry(symbol, account, report)
-                    except Exception as exc:  # isolate a bad symbol; count it
-                        self.audit.record("symbol_error", symbol=symbol, error=str(exc))
-                        report.skipped.append((symbol, f"error: {exc}"))
-                        if not self.risk.breakers.register_error().ok:
-                            raise RuntimeError("too many consecutive errors") from exc
-
-                # Every symbol we could age-check came back stale -> the feed
-                # itself has stalled. Default-to-halt rather than idle silently.
-                if report.data_checked > 0 and len(report.stale) == report.data_checked:
-                    self.audit.record("stale_data", detail=str(report.stale))
-                    self._halt(report,
-                               f"stale data on all {report.data_checked} checked symbol(s): "
-                               f"{report.stale}", HaltClass.STALE_DATA)
+                # 2. Kill switch.
+                ks = self.risk.breakers.check_daily_loss(account.last_equity, account.equity)
+                if not ks.ok:
+                    self.audit.record("kill_switch", detail=ks.reason)
+                    if self.execute:
+                        self._flatten()
+                    self._halt(report, f"kill switch: {ks.reason}", HaltClass.KILL_SWITCH)
                     return report
 
-            if self.execute:
-                self.store.save(self.positions)
-            self.risk.breakers.reset_errors()
-            self.state.to(State.IDLE)
-            report.state = self.state.state.value
-            # Ops heartbeat: lets the watchdog / MCP ops view answer "did the
-            # last cycle actually run, and what did it do?"
-            self.audit.record(
-                "cycle_complete",
-                mode=("execute" if self.execute else "propose" if self.propose else "shadow"),
-                summary=report.summary(),
-                opened=len(report.opened), proposed=len(report.proposed),
-                exited=len(report.exited), stops_raised=len(report.stops_raised),
-                stale=len(report.stale),
-            )
-            self.log.info(report.summary())
+                market_open = retry_transient(self.broker.is_market_open)
+
+                # 3. Raise resting stops (safe even when closed -- trails the stop).
+                self._raise_stops(report)
+
+                # 4. Signal exits + new entries only place orders when the market
+                #    is open (market entries/closes are rejected outside RTH).
+                if not market_open:
+                    self.log.info("market closed -- stops managed, no entries/exits")
+                    report.skipped.append(("*", "market closed"))
+                else:
+                    # Signal-driven exits (e.g. opposite-EMA break).
+                    self._evaluate_exits(report)
+
+                    # Generate / size / (optionally) execute new entries.
+                    for symbol in self.config.enabled_symbols():
+                        held = self.positions.get(symbol)
+                        if held is not None and held.status != PositionStatus.CLOSED:
+                            continue
+                        try:
+                            self._consider_entry(symbol, account, report)
+                        except Exception as exc:  # isolate a bad symbol; count it
+                            self.audit.record("symbol_error", symbol=symbol, error=str(exc))
+                            report.skipped.append((symbol, f"error: {exc}"))
+                            if not self.risk.breakers.register_error().ok:
+                                raise RuntimeError("too many consecutive errors") from exc
+
+                    # Every symbol we could age-check came back stale -> the feed
+                    # itself has stalled. Default-to-halt rather than idle silently.
+                    if report.data_checked > 0 and len(report.stale) == report.data_checked:
+                        self.audit.record("stale_data", detail=str(report.stale))
+                        self._halt(report,
+                                   f"stale data on all {report.data_checked} checked symbol(s): "
+                                   f"{report.stale}", HaltClass.STALE_DATA)
+                        return report
+
+                if self.execute:
+                    self.store.save(self.positions)
+                self.risk.breakers.reset_errors()
+                self.state.to(State.IDLE)
+                report.state = self.state.state.value
+                # Ops heartbeat: lets the watchdog / MCP ops view answer "did the
+                # last cycle actually run, and what did it do?"
+                self.audit.record(
+                    "cycle_complete",
+                    mode=("execute" if self.execute else "propose" if self.propose else "shadow"),
+                    summary=report.summary(),
+                    opened=len(report.opened), proposed=len(report.proposed),
+                    exited=len(report.exited), stops_raised=len(report.stops_raised),
+                    stale=len(report.stale),
+                )
+                self.log.info(report.summary())
+                return report
+
+        except BotBusy as exc:
+            # A phone action is mid-flight; not a fault worth halting over --
+            # the next scheduled invocation will pick this up.
+            self.audit.record("cycle_skipped_busy", detail=str(exc))
+            self.log.info("cycle skipped -- %s", exc)
+            report.reconciled = True
             return report
 
         except Exception as exc:  # any unhandled error -> halt, never keep trading
@@ -260,9 +283,17 @@ class Orchestrator:
 
     # --- phases ---
     def _settle_pending(self) -> None:
-        for pos in self.positions.values():
-            if pos.status == PositionStatus.PENDING_ENTRY:
-                self.order_manager.settle(pos)
+        for symbol, pos in list(self.positions.items()):
+            if pos.status != PositionStatus.PENDING_ENTRY:
+                continue
+            self.order_manager.settle(pos)
+            if is_dead_entry(pos):
+                self.audit.record("order_rejected", symbol=symbol,
+                                  broker_status=pos.last_order_status)
+                self._notify("fill", f"{symbol} entry never filled "
+                                     f"(broker status: {pos.last_order_status})")
+                self.log.warning("entry for %s was %s -- dropping", symbol, pos.last_order_status)
+                del self.positions[symbol]
 
     def _bar_age(self, feats) -> int | None:
         from src.data.ingest import last_bar_age_days  # lazy: keep tests offline-light
