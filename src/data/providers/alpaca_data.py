@@ -44,17 +44,39 @@ class AlpacaData:
         symbol: str,
         lookback_days: int = 400,
         end: datetime | None = None,
+        start: datetime | None = None,
     ) -> pd.DataFrame:
-        """Fetch adjusted daily bars as a UTC time-indexed OHLCV frame."""
+        """Fetch adjusted daily bars as a UTC time-indexed OHLCV frame.
+
+        `start` (when given) wins over `lookback_days` -- used by incremental
+        ingest to fetch only what the local cache is missing.
+        """
+        result = self.get_daily_bars_multi([symbol], lookback_days, end=end, start=start)
+        return result.get(symbol, pd.DataFrame(columns=_OHLCV))
+
+    def get_daily_bars_multi(
+        self,
+        symbols: list[str],
+        lookback_days: int = 400,
+        end: datetime | None = None,
+        start: datetime | None = None,
+    ) -> dict[str, pd.DataFrame]:
+        """One batched request for many symbols -> {symbol: OHLCV frame}.
+
+        Alpaca accepts a symbol list natively, so screening a large universe
+        costs one HTTP round-trip instead of N.
+        """
         from alpaca.data.enums import Adjustment
         from alpaca.data.requests import StockBarsRequest
         from alpaca.data.timeframe import TimeFrame
 
+        if not symbols:
+            return {}
         end = end or datetime.now(timezone.utc)
-        start = end - timedelta(days=lookback_days)
+        start = start or (end - timedelta(days=lookback_days))
 
         request = StockBarsRequest(
-            symbol_or_symbols=symbol,
+            symbol_or_symbols=list(symbols),
             timeframe=TimeFrame.Day,
             start=start,
             end=end,
@@ -63,13 +85,19 @@ class AlpacaData:
         )
         bars = self._get_client().get_stock_bars(request)
         df = bars.df
+        empty = pd.DataFrame(columns=_OHLCV)
         if df.empty:
-            return pd.DataFrame(columns=_OHLCV)
+            return {s: empty.copy() for s in symbols}
 
-        # alpaca-py returns a MultiIndex (symbol, timestamp); flatten to time only.
-        if isinstance(df.index, pd.MultiIndex):
-            df = df.xs(symbol, level="symbol")
-        df = df[_OHLCV].copy()
-        df.index = pd.to_datetime(df.index, utc=True)
-        df.index.name = "ts"
-        return df
+        out: dict[str, pd.DataFrame] = {}
+        for sym in symbols:
+            try:
+                sub = df.xs(sym, level="symbol") if isinstance(df.index, pd.MultiIndex) else df
+            except KeyError:
+                out[sym] = empty.copy()
+                continue
+            sub = sub[_OHLCV].copy()
+            sub.index = pd.to_datetime(sub.index, utc=True)
+            sub.index.name = "ts"
+            out[sym] = sub
+        return out

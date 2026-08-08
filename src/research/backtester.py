@@ -26,11 +26,9 @@ from src.common.models import Side
 from src.research.metrics import compute_metrics
 from src.risk.ratchet_stop import build_ratchet
 from src.risk.risk_manager import AccountState, RiskManager
-from src.strategy.breakout import Breakout
-from src.strategy.mean_reversion import MeanReversion
 from src.strategy.regime_filter import RegimeFilter
+from src.strategy.registry import build_strategies
 from src.strategy.sentiment_gate import SentimentGate
-from src.strategy.trend_following import TrendFollowing
 
 
 @dataclass
@@ -85,11 +83,7 @@ class Backtester:
 
         self.regime = RegimeFilter(self.config)
         self.sentiment = SentimentGate(self.config)
-        self.strategies = {
-            "trend_following": TrendFollowing(self.config),
-            "mean_reversion": MeanReversion(self.config),
-            "breakout": Breakout(self.config),
-        }
+        self.strategies = build_strategies(self.config)
         self.risk = RiskManager(self.config)
         self.max_open = int(self.config.risk_limits.get("account", {}).get("max_open_positions", 10))
 

@@ -22,11 +22,9 @@ from src.data.features import build_features
 from src.data.ingest import ingest_symbol
 from src.execution.broker_alpaca import AlpacaBroker
 from src.risk.risk_manager import AccountState, RiskManager
-from src.strategy.breakout import Breakout
-from src.strategy.mean_reversion import MeanReversion
 from src.strategy.regime_filter import RegimeFilter
+from src.strategy.registry import build_strategies
 from src.strategy.sentiment_gate import SentimentGate
-from src.strategy.trend_following import TrendFollowing
 
 
 def main() -> None:
@@ -36,11 +34,7 @@ def main() -> None:
 
     regime_filter = RegimeFilter(config)
     sentiment = SentimentGate(config)  # neutral (no live scorer wired yet)
-    strategies = {
-        "trend_following": TrendFollowing(config),
-        "mean_reversion": MeanReversion(config),
-        "breakout": Breakout(config),
-    }
+    strategies = build_strategies(config)
     risk = RiskManager(config)
 
     # Read-only account snapshot (NEVER places orders).

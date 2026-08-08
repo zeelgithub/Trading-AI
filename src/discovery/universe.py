@@ -59,18 +59,10 @@ def discovery_universe(config: Config, disclosures: str | Path = DEFAULT_DISCLOS
 
 
 def cached_feature_provider(config: Config):
-    """A symbol -> feature-frame callable that ingests fresh bars then builds the
-    causal feature frame. Mirrors the orchestrator's default provider so the
+    """A symbol -> feature-frame callable. Delegates to the data layer's
+    `live_feature_provider` -- the SAME pipeline the orchestrator uses
+    (incremental ingest, in-progress bar dropped, causal features), so the
     technical source sees exactly what the live cycle sees."""
-    from src.data import store
-    from src.data.features import build_features
-    from src.data.ingest import ingest_symbol
+    from src.data.ingest import live_feature_provider
 
-    lookback = int(config.get("settings.data.lookback_days", 400))
-    conn = store.connect()
-
-    def provider(symbol: str) -> pd.DataFrame:
-        ingest_symbol(conn, symbol, lookback_days=lookback)
-        return build_features(store.load_bars(conn, symbol), config)
-
-    return provider
+    return live_feature_provider(config)

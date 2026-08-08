@@ -23,10 +23,8 @@ import pandas as pd
 from src.common.config import Config
 from src.discovery.candidate import SignalContribution
 from src.research.scoreboard import Scoreboard
-from src.strategy.breakout import Breakout
-from src.strategy.mean_reversion import MeanReversion
 from src.strategy.regime_filter import RegimeFilter
-from src.strategy.trend_following import TrendFollowing
+from src.strategy.registry import build_strategies
 
 FeatureProvider = Callable[[str], pd.DataFrame]
 
@@ -45,11 +43,7 @@ class TechnicalSource:
 
     def __post_init__(self) -> None:
         self._regime = RegimeFilter(self.config)
-        self._strategies = {
-            "trend_following": TrendFollowing(self.config),
-            "mean_reversion": MeanReversion(self.config),
-            "breakout": Breakout(self.config),
-        }
+        self._strategies = build_strategies(self.config)
 
     def gather(self) -> list[SignalContribution]:
         board = (self.scoreboard or Scoreboard()).load()

@@ -69,6 +69,16 @@ def upsert_bars(conn: sqlite3.Connection, symbol: str, bars: pd.DataFrame) -> in
     return len(rows)
 
 
+def last_bar_ts(conn: sqlite3.Connection, symbol: str) -> pd.Timestamp | None:
+    """Timestamp of the newest stored bar for `symbol`, or None if none."""
+    row = conn.execute(
+        "SELECT MAX(ts) FROM bars WHERE symbol = ?", (symbol,)
+    ).fetchone()
+    if not row or row[0] is None:
+        return None
+    return pd.Timestamp(row[0])
+
+
 def load_bars(
     conn: sqlite3.Connection,
     symbol: str,
