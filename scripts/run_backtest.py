@@ -1,16 +1,19 @@
 """
 Entrypoint: backtest run.
 
-Loads stored daily bars for the watchlist, builds features, and runs the
-event-driven backtester. Prints headline metrics and the closed trades.
-Offline / read-only -- never touches the broker.
+Loads stored daily bars, builds features, and runs the event-driven
+backtester. Prints headline metrics and the closed trades. Offline / read-only
+-- never touches the broker.
 
 Usage:
     python -m scripts.fetch_data       # first, to populate the local store
-    python -m scripts.run_backtest
+    python -m scripts.run_backtest                       # research universe
+    python -m scripts.run_backtest --symbols AAPL MSFT    # explicit override
 """
 
 from __future__ import annotations
+
+import argparse
 
 from src.common.config import load_config
 from src.data import store
@@ -20,10 +23,21 @@ from src.research.backtester import Backtester
 
 def main() -> None:
     config = load_config()
+    # Same default as scripts.evaluate_strategies: the wider research universe
+    # when configured, else the live watchlist.
+    default_symbols = list(config.get("settings.research.backtest_universe", None)
+                           or config.enabled_symbols())
+    parser = argparse.ArgumentParser(description="Run the event-driven backtester.")
+    parser.add_argument("--symbols", nargs="+", default=None,
+                        help=f"symbols to backtest (default: research universe, "
+                             f"{len(default_symbols)} symbols)")
+    args = parser.parse_args()
+    symbols = args.symbols or default_symbols
+
     conn = store.connect()
 
     features_by_symbol = {}
-    for symbol in config.enabled_symbols():
+    for symbol in symbols:
         bars = store.load_bars(conn, symbol)
         if bars.empty:
             print(f"{symbol}: no stored bars (run scripts.fetch_data first)")

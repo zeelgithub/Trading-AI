@@ -13,7 +13,7 @@ from tests.unit.synth import flat_frame
 
 def test_trending_routes_to_trend_following():
     rf = RegimeFilter(load_config())
-    df = flat_frame(30, value=100.0, adx=30.0)
+    df = flat_frame(30, value=100.0, adx=35.0)  # >= trending_adx_min (32)
     assert rf.classify(df) == Regime.TRENDING
     assert rf.active_strategy(df) == "trend_following"
 
@@ -21,6 +21,16 @@ def test_trending_routes_to_trend_following():
 def test_ranging_routes_to_mean_reversion():
     rf = RegimeFilter(load_config())
     df = flat_frame(30, value=100.0, adx=15.0)
+    assert rf.classify(df) == Regime.RANGING
+    assert rf.active_strategy(df) == "mean_reversion"
+
+
+def test_ranging_band_widened_for_mean_reversion_coverage():
+    # Evidence-based widening (see config/strategies.yaml comment): ADX 26 used
+    # to fall in the old dead zone (20-25) and get NO strategy at all, even
+    # though mean-reversion's median signal ADX is ~27 -- it must now route.
+    rf = RegimeFilter(load_config())
+    df = flat_frame(30, value=100.0, adx=26.0)
     assert rf.classify(df) == Regime.RANGING
     assert rf.active_strategy(df) == "mean_reversion"
 
@@ -35,7 +45,7 @@ def test_expansion_routes_to_breakout():
 
 def test_dead_zone_stands_aside():
     rf = RegimeFilter(load_config())
-    df = flat_frame(30, value=100.0, adx=22.0)  # 20<adx<25, no breakout
+    df = flat_frame(30, value=100.0, adx=30.0)  # 28 < adx < 32, no breakout
     assert rf.classify(df) == Regime.NONE
     assert rf.active_strategy(df) is None
 

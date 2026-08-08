@@ -4,14 +4,32 @@
 regime_filter:
   enabled: true
   adx_period: 14
-  trending_adx_min: 25       # ADX > 25 => trending
-  ranging_adx_max: 20        # ADX < 20 => ranging  (20-25 = dead zone, stand aside)
+  # Thresholds are evidence-based, not textbook defaults: measured against 27
+  # liquid symbols over ~14 months (2026-08), ADX at the moment mean-reversion's
+  # OWN signal fires (price >=2 sigma from the 20-day mean + RSI extreme) has a
+  # MEDIAN of ~27 -- reaching a genuine 2-sigma stretch is itself a directional
+  # thrust that pushes ADX up, so the textbook "ranging = ADX<=20" gate was
+  # rejecting ~85% of real mean-reversion setups (only 38/243 raw signals
+  # qualified). Widened so mean-reversion gets a fair shot at the setups it's
+  # actually designed to catch, while trend_following's floor moved up to keep
+  # its own regime reserved for genuinely established trends, not weak ones.
+  # See docs/STRATEGIES.md "Regime thresholds" for the full measurement.
+  trending_adx_min: 32       # ADX >= 32 => trending
+  ranging_adx_max: 28        # ADX <= 28 => ranging  (28-32 = dead zone, stand aside)
   ema_fast: 50
   ema_slow: 200
   routing:
     trending: trend_following
     ranging: mean_reversion
     expansion: breakout       # ATR rising + range break on volume
+
+# Shared precision bar for every "confirmation candle" / "rejection candle"
+# check across all three strategies: the candle's real body must be at least
+# this fraction of its own high-low range, not just any tick that closed in
+# the right direction. Filters out a weak doji confirming a reversal or a
+# breakout on no real conviction. 0.5 = body is at least half the day's range.
+confirmation_candle:
+  min_body_ratio: 0.5
 
 strategies:
 
@@ -28,6 +46,13 @@ strategies:
       rsi_long_band: [40, 70]
       rsi_short_band: [30, 60]
       min_volume_vs_ma: 1.0
+      # A real pullback-and-reclaim usually plays out over a couple of days,
+      # not one bar: measured against the research universe, requiring the
+      # EMA20 touch and the confirmation candle on the identical bar found
+      # 468 setups; allowing the touch anywhere in the last 3 bars (today
+      # must still be the confirmation/reclaim bar) found 635 -- ~36% more
+      # genuine opportunity, same precision on the entry trigger itself.
+      pullback_lookback_bars: 3
     entry:
       long: "pullback to ema20 + bullish confirmation candle"
       short: "rejection from ema20 + bearish confirmation candle"
@@ -43,6 +68,14 @@ strategies:
     conditions:
       long_setup: "price <= lower_band and rsi < 30"
       short_setup: "price >= upper_band and rsi > 70"
+      # Same timing issue as trend_following's pullback, measured the same
+      # way: requiring the band-touch/RSI-extreme and the reversal
+      # confirmation candle on the IDENTICAL bar found only 1 qualifying day
+      # across the research universe (~14 months, 27 symbols) -- reaching a
+      # 2-sigma extreme and reversing are rarely the same day. Allowing the
+      # extreme anywhere in the last 3 bars (today must still be the
+      # confirmation bar) found 34.
+      reversion_lookback_bars: 3
     entry:
       long: "oversold + bullish confirmation candle"
       short: "overbought + bearish rejection candle"

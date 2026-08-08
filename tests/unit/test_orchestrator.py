@@ -18,12 +18,15 @@ from tests.unit.synth import make_features
 
 
 def approve_frame(_symbol=None):
-    """Trending long setup that passes regime + trend-following + risk."""
+    """Trending long setup that passes regime + trend-following + risk.
+    3 rows: pullback_lookback_bars defaults to 3; adx=35 clears the
+    evidence-based trending_adx_min (32, see config/strategies.yaml)."""
     rows = [
+        {"close": 102, "open": 102},
         {"close": 103, "open": 103},
         {"close": 105, "open": 104, "high": 105.5, "low": 104.0,
          "ema20": 104.5, "ema50": 100, "ema200": 95, "rsi": 55,
-         "volume": 2e6, "vol_sma": 1e6, "adx": 30, "atr": 1.0},
+         "volume": 2e6, "vol_sma": 1e6, "adx": 35, "atr": 1.0},
     ]
     return make_features(rows)
 

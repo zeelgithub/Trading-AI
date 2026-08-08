@@ -54,12 +54,18 @@ def _build_features(symbols: list[str], lookback_days: int, offline: bool) -> di
 
 def main() -> None:
     config = load_config()
-    default_symbols = config.enabled_symbols()
+    # Default to the wider research universe (settings.research.backtest_universe)
+    # when set -- 3 live-watchlist symbols produce too few trades to tell a real
+    # edge from noise against the pipeline's own min_trades bar. Falls back to
+    # the watchlist if the research universe isn't configured.
+    default_symbols = list(config.get("settings.research.backtest_universe", None)
+                           or config.enabled_symbols())
     default_lookback = int(config.get("settings.data.lookback_days", 400))
 
     parser = argparse.ArgumentParser(description="Evaluate strategies: signal vs. noise.")
     parser.add_argument("--symbols", nargs="+", default=None,
-                        help=f"symbols to evaluate (default: watchlist {default_symbols})")
+                        help=f"symbols to evaluate (default: research universe, "
+                             f"{len(default_symbols)} symbols)")
     parser.add_argument("--lookback-days", type=int, default=default_lookback)
     parser.add_argument("--offline", action="store_true", help="use only cached bars; no data fetch")
     parser.add_argument("--bootstrap", type=int, default=5000, help="bootstrap resamples")

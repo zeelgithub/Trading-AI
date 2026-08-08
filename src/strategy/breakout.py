@@ -1,9 +1,10 @@
 """
 Strategy 3: Breakout -- strategy layer.
 
-Close beyond recent support/resistance, confirmed by a volume spike (>= 1.5x
-the 20-day average) and rising ATR (volatility expansion). ATR-scaled stop.
-Emits intents only.
+Close beyond recent support/resistance, confirmed by (a) a real-bodied
+breakout candle in the breakout direction -- not just any close past the
+level -- (b) a volume spike (>= 1.5x the 20-day average), and (c) rising ATR
+(volatility expansion). ATR-scaled stop. Emits intents only.
 
 Boundary: places orders NO.
 """
@@ -13,7 +14,7 @@ from __future__ import annotations
 import pandas as pd
 
 from src.common.models import Action, Intent, Side
-from src.strategy.base import Strategy, has_nan
+from src.strategy.base import Strategy, bearish_confirmation, bullish_confirmation, has_nan
 
 _REQUIRED = ["atr", "vol_sma"]
 
@@ -28,7 +29,7 @@ class Breakout(Strategy):
 
         if len(features) < lookback + 2:
             return None
-        last = features.iloc[-1]
+        last, prev = features.iloc[-1], features.iloc[-2]
         if has_nan(last, _REQUIRED):
             return None
 
@@ -43,9 +44,14 @@ class Breakout(Strategy):
         if not (vol_spike and atr_rising):
             return None
 
-        if close > resistance:
+        # The close must beat the level on a real-bodied breakout candle, not
+        # just tick past it -- a weak-bodied close beyond resistance is exactly
+        # the false-breakout shape this strategy's own docs flag as its risk.
+        if (close > resistance
+                and bullish_confirmation(last, prev, self.confirmation_min_body_ratio)):
             return self._intent(symbol, Side.LONG, close, last.atr)
-        if close < support and self.shorts_allowed(symbol):
+        if (close < support and self.shorts_allowed(symbol)
+                and bearish_confirmation(last, prev, self.confirmation_min_body_ratio)):
             return self._intent(symbol, Side.SHORT, close, last.atr)
         return None
 

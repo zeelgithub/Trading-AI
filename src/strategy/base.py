@@ -27,6 +27,12 @@ class Strategy(ABC):
         self.config = config
         self.params = config.strategies.get("strategies", {}).get(self.name, {})
         self.ratchet_params = config.risk_limits.get("ratchet_stop", {}).get(self.name, {})
+        # Shared precision bar for "confirmation candle" across all strategies:
+        # the candle's body must be at least this fraction of its own high-low
+        # range, not just any tick in the right direction. See
+        # config/strategies.yaml -> confirmation_candle.
+        self.confirmation_min_body_ratio = float(
+            config.strategies.get("confirmation_candle", {}).get("min_body_ratio", 0.5))
 
     @abstractmethod
     def generate(self, symbol: str, features: pd.DataFrame) -> Intent | None:
@@ -61,10 +67,25 @@ def has_nan(row: pd.Series, cols: list[str]) -> bool:
     return any(pd.isna(row[c]) for c in cols)
 
 
-def bullish_confirmation(curr: pd.Series, prev: pd.Series) -> bool:
-    """Bullish candle that also closes above the prior close."""
-    return curr.close > curr.open and curr.close > prev.close
+def _body_ratio_ok(curr: pd.Series, min_body_ratio: float) -> bool:
+    """True if the candle's real body is at least `min_body_ratio` of its own
+    high-low range. Filters out a weak tick or doji that happens to close in
+    the right direction but shows no real conviction -- e.g. a 0.1%-body candle
+    sitting inside a wide range shouldn't confirm a reversal or a breakout."""
+    rng = curr.high - curr.low
+    if rng <= 0 or pd.isna(rng):
+        return False
+    body = abs(curr.close - curr.open)
+    return (body / rng) >= min_body_ratio
 
 
-def bearish_confirmation(curr: pd.Series, prev: pd.Series) -> bool:
-    return curr.close < curr.open and curr.close < prev.close
+def bullish_confirmation(curr: pd.Series, prev: pd.Series, min_body_ratio: float = 0.5) -> bool:
+    """A real-bodied bullish candle (see `_body_ratio_ok`) that also closes
+    above the prior close -- not just any green tick."""
+    return (curr.close > curr.open and curr.close > prev.close
+            and _body_ratio_ok(curr, min_body_ratio))
+
+
+def bearish_confirmation(curr: pd.Series, prev: pd.Series, min_body_ratio: float = 0.5) -> bool:
+    return (curr.close < curr.open and curr.close < prev.close
+            and _body_ratio_ok(curr, min_body_ratio))

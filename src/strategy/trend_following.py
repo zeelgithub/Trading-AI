@@ -2,7 +2,11 @@
 Strategy 1: Trend Following -- strategy layer.
 
 Daily trend bias via 50/200 EMA, RSI band filter, volume confirmation; entries
-on a pullback to the 20 EMA with a confirmation candle. Emits intents only.
+on a pullback to the 20 EMA with a confirmation candle. The EMA touch and the
+confirmation candle need not be the same bar -- a real pullback-and-reclaim
+usually plays out over a couple of days (see `pullback_lookback_bars` in
+config/strategies.yaml); the confirmation candle must still be TODAY's bar.
+Emits intents only.
 
 Boundary: places orders NO.
 """
@@ -15,14 +19,15 @@ from src.common.models import Action, Intent, Side
 from src.strategy.base import Strategy, bearish_confirmation, bullish_confirmation, has_nan
 
 _REQUIRED = ["ema20", "ema50", "ema200", "rsi", "vol_sma", "adx"]
-_PROXIMITY = 0.02  # "pullback to 20 EMA" = bar traded within 2% of it
+_PROXIMITY = 0.02  # "pullback to 20 EMA" = a bar traded within 2% of it
 
 
 class TrendFollowing(Strategy):
     name = "trend_following"
 
     def generate(self, symbol: str, features: pd.DataFrame) -> Intent | None:
-        if len(features) < 2:
+        lookback = int(self.params.get("conditions", {}).get("pullback_lookback_bars", 3))
+        if len(features) < max(2, lookback):
             return None
         last, prev = features.iloc[-1], features.iloc[-2]
         if has_nan(last, _REQUIRED):
@@ -36,15 +41,24 @@ class TrendFollowing(Strategy):
 
         long_bias = close > last.ema50 and close > last.ema200
         short_bias = close < last.ema50 and close < last.ema200
+        window = features.iloc[-lookback:]
 
         if long_bias and 40 <= last.rsi <= 70:
-            pulled_back = last.low <= last.ema20 * (1 + _PROXIMITY)
-            if pulled_back and bullish_confirmation(last, prev) and close > last.ema20:
+            # The touch can be any of the last `lookback` bars; the reclaim
+            # (today's close back above the 20 EMA) and the confirmation
+            # candle must be TODAY -- that precision is what makes it an entry
+            # trigger, not just "sometime recently the price was near the MA."
+            pulled_back_recently = (window["low"] <= window["ema20"] * (1 + _PROXIMITY)).any()
+            if (pulled_back_recently
+                    and bullish_confirmation(last, prev, self.confirmation_min_body_ratio)
+                    and close > last.ema20):
                 return self._intent(symbol, Side.LONG, close, last.adx)
 
         if short_bias and 30 <= last.rsi <= 60 and self.shorts_allowed(symbol):
-            rejected = last.high >= last.ema20 * (1 - _PROXIMITY)
-            if rejected and bearish_confirmation(last, prev) and close < last.ema20:
+            rejected_recently = (window["high"] >= window["ema20"] * (1 - _PROXIMITY)).any()
+            if (rejected_recently
+                    and bearish_confirmation(last, prev, self.confirmation_min_body_ratio)
+                    and close < last.ema20):
                 return self._intent(symbol, Side.SHORT, close, last.adx)
 
         return None

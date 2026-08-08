@@ -66,8 +66,14 @@ def test_no_intent_means_no_contribution():
 
 
 def test_noise_verdict_discounts_score(tmp_path):
-    board = Scoreboard(tmp_path / "sb.json")
-    board.upsert(StrategyScore(strategy="trend_following", verdict="noise"))
-    noisy = _source(_intent(), scoreboard=board).gather()[0]
-    neutral = _source(_intent()).gather()[0]  # empty board -> "inconclusive"
+    # Both boards are explicitly isolated (tmp_path): relying on the default
+    # Scoreboard() pointing at the real state/scoreboard.json broke this test
+    # the moment a real `evaluate_strategies` run gave trend_following an
+    # actual verdict there -- the "empty board" case must be a genuinely
+    # empty board, not whatever happens to be in the live scoreboard today.
+    noisy_board = Scoreboard(tmp_path / "noisy.json")
+    noisy_board.upsert(StrategyScore(strategy="trend_following", verdict="noise"))
+    empty_board = Scoreboard(tmp_path / "empty.json")
+    noisy = _source(_intent(), scoreboard=noisy_board).gather()[0]
+    neutral = _source(_intent(), scoreboard=empty_board).gather()[0]  # "inconclusive"
     assert noisy.score < neutral.score

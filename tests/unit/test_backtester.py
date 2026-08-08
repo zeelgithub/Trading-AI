@@ -16,10 +16,11 @@ from tests.unit.synth import make_features
 
 def _winning_trend_frame() -> pd.DataFrame:
     rows = [
+        {"open": 97, "high": 97.5, "low": 96.5, "close": 97},          # warmup
         {"open": 98, "high": 98.5, "low": 97.5, "close": 98},          # warmup
         {"open": 99, "high": 100.5, "low": 99.0, "close": 100,         # SIGNAL day
          "ema20": 99.5, "ema50": 95, "ema200": 90, "rsi": 55,
-         "volume": 2e6, "vol_sma": 1e6, "adx": 30, "atr": 1.0},
+         "volume": 2e6, "vol_sma": 1e6, "adx": 35, "atr": 1.0},
         {"open": 100, "high": 106, "low": 100, "close": 105},          # FILL @100, rally
         {"open": 105, "high": 116, "low": 104, "close": 115},
         {"open": 115, "high": 126, "low": 114, "close": 125},          # +25% -> stop to 110

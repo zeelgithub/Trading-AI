@@ -141,6 +141,10 @@ class AlertsSettings(_Lenient):
     events: list[str] = Field(default_factory=list)
 
 
+class ResearchSettings(_Lenient):
+    backtest_universe: list[str] = Field(default_factory=list)
+
+
 class BacktestSettings(_Lenient):
     # Alpaca is commission-free for US equities; slippage is a conservative
     # fill-cost assumption so backtests don't look better than live will be.
@@ -165,6 +169,7 @@ class SettingsSchema(_Lenient):
     watchdog: WatchdogSettings = Field(default_factory=WatchdogSettings)
     approval: ApprovalSettings = Field(default_factory=ApprovalSettings)
     alerts: AlertsSettings = Field(default_factory=AlertsSettings)
+    research: ResearchSettings = Field(default_factory=ResearchSettings)
     backtest: BacktestSettings = Field(default_factory=BacktestSettings)
     self_heal: SelfHealSettings = Field(default_factory=SelfHealSettings)
     concurrency: ConcurrencySettings = Field(default_factory=ConcurrencySettings)

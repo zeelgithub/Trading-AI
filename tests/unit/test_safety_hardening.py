@@ -98,10 +98,11 @@ def _dated(df: pd.DataFrame, end: str | pd.Timestamp) -> pd.DataFrame:
 
 def _approve_rows():
     return [
+        {"close": 102, "open": 102},
         {"close": 103, "open": 103},
         {"close": 105, "open": 104, "high": 105.5, "low": 104.0,
          "ema20": 104.5, "ema50": 100, "ema200": 95, "rsi": 55,
-         "volume": 2e6, "vol_sma": 1e6, "adx": 30, "atr": 1.0},
+         "volume": 2e6, "vol_sma": 1e6, "adx": 35, "atr": 1.0},
     ]
 
 

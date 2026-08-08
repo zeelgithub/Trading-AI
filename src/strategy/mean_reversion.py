@@ -2,9 +2,14 @@
 Strategy 2: Mean Reversion -- strategy layer.
 
 Bollinger-band stretch (price >= 2 sigma from the 20-day SMA) plus an RSI
-extreme, confirmed by a reversal candle. Tight 2% stop and ~2% target (the
-target IS the strategy's exit; the ratchet only provides the downside stop).
-Emits intents only.
+extreme, confirmed by a real-bodied reversal candle (see
+src/strategy/base.py bullish_confirmation/bearish_confirmation). The extreme
+touch and the confirmation candle need not be the same bar -- reaching a
+2-sigma stretch and then reversing are rarely the identical day (see
+`reversion_lookback_bars` in config/strategies.yaml); the confirmation
+candle must still be TODAY's bar. Tight 2% stop and ~2% target (the target
+IS the strategy's exit; the ratchet only provides the downside stop). Emits
+intents only.
 
 Boundary: places orders NO.
 """
@@ -23,20 +28,23 @@ class MeanReversion(Strategy):
     name = "mean_reversion"
 
     def generate(self, symbol: str, features: pd.DataFrame) -> Intent | None:
-        if len(features) < 2:
+        lookback = int(self.params.get("conditions", {}).get("reversion_lookback_bars", 3))
+        if len(features) < max(2, lookback):
             return None
         last, prev = features.iloc[-1], features.iloc[-2]
         if has_nan(last, _REQUIRED):
             return None
 
         close = last.close
+        window = features.iloc[-lookback:]
+        touched_long = ((window["close"] <= window["bb_lower"]) & (window["rsi"] < 30)).any()
+        touched_short = ((window["close"] >= window["bb_upper"]) & (window["rsi"] > 70)).any()
 
-        long_setup = close <= last.bb_lower and last.rsi < 30
-        if long_setup and bullish_confirmation(last, prev):
+        if touched_long and bullish_confirmation(last, prev, self.confirmation_min_body_ratio):
             return self._intent(symbol, Side.LONG, close)
 
-        short_setup = close >= last.bb_upper and last.rsi > 70
-        if short_setup and bearish_confirmation(last, prev) and self.shorts_allowed(symbol):
+        if (touched_short and bearish_confirmation(last, prev, self.confirmation_min_body_ratio)
+                and self.shorts_allowed(symbol)):
             return self._intent(symbol, Side.SHORT, close)
 
         return None

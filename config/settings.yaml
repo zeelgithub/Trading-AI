@@ -65,6 +65,13 @@ concurrency:
   cycle_lock_timeout_seconds: 60
   action_lock_timeout_seconds: 15
 
+backtest:
+  # Cost assumptions for src/research/backtester.py. Alpaca is commission-free
+  # for US equities; slippage is a conservative fill-cost assumption so
+  # backtests don't systematically look better than live/paper trading will.
+  commission_per_share: 0.0
+  slippage_bps: 5.0
+
 approval:
   # Propose-and-approve: the bot decides and pushes trades to the phone but
   # places NOTHING until you approve. `--execute` is converted to propose while
@@ -72,6 +79,25 @@ approval:
   require_approval: true
   proposal_expiry_minutes: 1080   # 18h -- a proposal made near the close expires
                                   # before the next session if left untouched
+
+research:
+  # Validation universe for scripts/evaluate_strategies.py -- DISTINCT from
+  # the live watchlist (config/symbols.yaml), which stays small and explicit.
+  # 3 live symbols produced only 8 backtest trades total, far short of the
+  # evaluation pipeline's own min_trades=30 significance bar; a strategy
+  # can't be told apart from noise on that little data. This basket is
+  # liquid, sector-diverse large caps (tech, financials, healthcare, energy,
+  # industrials, staples, media) so all three regimes (trending/ranging/
+  # expansion) get real coverage. `--symbols` still overrides per run.
+  backtest_universe:
+    [AAPL, MSFT, GOOGL, AMZN, NVDA, META, TSLA,
+     JPM, BAC, WFC, GS,
+     JNJ, UNH, PFE,
+     XOM, CVX,
+     HD, WMT, DIS, MCD,
+     BA, CAT, GE,
+     KO, PEP,
+     INTC, AMD]
 
 discovery:
   # Autonomous idea discovery: gather candidates from multiple free signal

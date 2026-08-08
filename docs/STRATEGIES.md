@@ -13,19 +13,72 @@ Config: [`config/strategies.yaml`](../config/strategies.yaml).
 | Expansion | ATR rising, range breaks on volume | Breakout |
 | Dead zone | 20 <= ADX <= 25 | stand aside |
 
+## Regime thresholds (evidence-based, revised)
+
+The regime router used to gate mean-reversion behind `ADX <= 20` ("ranging") -- the
+textbook definition. Measured against the research universe (27 symbols, ~14 months),
+ADX at the exact moment mean-reversion's own trigger fires (price >=2 sigma from the
+20-day mean + RSI extreme) has a **median of ~27**: reaching a real 2-sigma stretch is
+itself a directional thrust, which pushes ADX up, not down. The old gate admitted only
+38 of 243 raw signals (15.6%). `ranging_adx_max` is now 28 and `trending_adx_min` is 32
+(a narrower 28-32 dead zone, ADX values that are genuinely ambiguous either way) --
+raising overlap to 101/243 (41.6%) at ADX<=25 and further at the new 28 ceiling.
+
+This alone was not enough: after widening, actual backtest trades were still zero. The
+deeper bug was **entry timing**, described next.
+
+## Entry timing: extreme/pullback and confirmation need not be the same bar
+
+Both directional strategies originally required the "event" (a pullback touching the
+20 EMA; a Bollinger-band extreme + RSI reading) and the "confirmation candle" to be the
+**identical bar**. Measured against the research universe, this is a severe, largely
+unintentional restriction:
+
+| strategy | same-bar-only | windowed (lookback=3) |
+|---|---|---|
+| trend_following (pullback -> reclaim) | 468 | 635 (+36%) |
+| mean_reversion (extreme -> reversal), regime-gated | 1 | 34 (34x) |
+
+A real pullback-and-reclaim, or a real oversold-and-reversal, typically plays out over a
+couple of days -- requiring both halves on one bar was asking for a coincidence, not a
+pattern. Both strategies now allow the event to have occurred anywhere in the last
+`pullback_lookback_bars` / `reversion_lookback_bars` bars (default 3, config-driven);
+the confirmation candle itself must still be **today's** bar -- that precision is what
+makes it a trigger, not a loosening of the signal itself.
+
+Net effect on the real evaluation run (27-symbol universe, ~14 months, both fixes plus
+the regime widening): mean_reversion went from 0 trades to 9; trend_following's own
+remaining bottleneck (volume filter 78->31 days, then the confirmation-candle body-ratio
+31->6) reflects genuine, deliberate selectivity, not a further timing bug -- it was left
+as-is rather than loosened further, to avoid curve-fitting the parameters to manufacture
+trade count instead of fixing an actual defect.
+
+## Confirmation candle (shared, precise)
+
+Every "confirmation candle" / "rejection candle" check across all three strategies uses
+the same rule (`src/strategy/base.py`, config: `strategies.yaml -> confirmation_candle`):
+the candle's real body (`|close - open|`) must be **at least 50% of its own high-low
+range**, in addition to closing in the signal direction and beyond the prior close. A
+green tick with a tiny body (a doji) does not confirm — it takes a real-bodied candle.
+This is the single precision bar `initial_stop_pct`-style tuning applies to; raise
+`min_body_ratio` for fewer, more selective entries, lower it for more.
+
 ## Strategy 1 — Trend Following (core)
 
 - **Bias:** price above 50 & 200 EMA = bullish; below both = bearish.
 - **Filters:** RSI 40-70 (long) / 30-60 (short); volume > 20-day average.
-- **Entry:** pullback to 20 EMA + confirmation candle (long); rejection from 20 EMA (short).
+- **Entry:** pullback to 20 EMA (within 2%) + confirmation candle that closes back
+  above the 20 EMA (long); rejection from 20 EMA + confirmation candle closing back
+  below it (short).
 - **Exit:** opposite EMA break OR ratchet stop (10% initial / +10% lock @ +20%).
 - **Known risk:** RSI <= 70 cap can filter out the strongest trends; whipsaw in chop.
+  Not yet backtested at meaningful sample size (see Validation status below).
 
 ## Strategy 2 — Mean Reversion (revised)
 
 - **Trigger:** Bollinger Bands — price >= 2 sigma from 20-day SMA (replaces VWAP, which is
   intraday-only and meaningless on daily bars) + RSI < 30 (long) / > 70 (short).
-- **Entry:** oversold + bullish confirmation (long); overbought + bearish rejection (short).
+- **Entry:** oversold + confirmation candle (long); overbought + confirmation candle (short).
 - **Exit:** revert to mean (SMA20) or +2% target; **hard 2% stop** (~1:1 R:R).
 - **Why tight:** a 10% stop against a 1-3% target is ~1:5 reverse risk/reward — a
   guaranteed bleed. Mean-reversion uses its own tight ratchet params.
@@ -33,11 +86,42 @@ Config: [`config/strategies.yaml`](../config/strategies.yaml).
 
 ## Strategy 3 — Breakout
 
-- **Trigger:** break of recent support/resistance + volume >= 1.5x average + rising ATR.
-- **Entry:** breakout confirmation candle close.
+- **Trigger:** break of recent support/resistance (20-bar high/low) + volume >= 1.5x
+  average + rising ATR **+ a real-bodied confirmation candle beyond the level**.
+- **Entry:** the confirmation-candle requirement above was previously undocumented-but-
+  missing from the code (a plain `close > resistance` fired with no candle-shape check
+  at all); it is now enforced, closing the gap between the documented design and the
+  implementation.
 - **Exit:** ATR-based ratchet stop (2x initial, 1.5x trail).
-- **Known risk:** false breakouts and slippage into momentum — needs close-confirmation and
-  realistic slippage modeling in backtest.
+- **Known risk:** false breakouts and slippage into momentum. The confirmation-candle
+  fix directly targets false breakouts; realistic slippage is modeled via
+  `settings.backtest.slippage_bps` (see docs/CONTRACTS.md / config/settings.yaml).
+
+## Validation status
+
+Not statistically validated as of this writing. Latest real run (27-symbol research
+universe, ~14 months, after the regime-threshold and entry-timing fixes above):
+
+| strategy | trades | verdict |
+|---|---|---|
+| breakout | 63 | NOISE (p=0.64) |
+| mean_reversion | 9 | NOISE (p=0.96, too few trades to say anything) |
+| trend_following | 3 | NOISE (p=1.00, too few trades to say anything) |
+
+None clear the evaluation pipeline's own `min_trades=30` significance bar. This is an
+honest reflection of a genuinely selective, multi-condition daily-swing system over a
+14-month window, not a result that was tuned to look better than it is — no parameter
+was loosened purely to inflate trade count once the two genuine timing bugs above were
+fixed. The realistic next step is a longer backtest history (multi-year) and/or a longer
+live paper-trading track record, not further parameter loosening.
+
+`scripts/evaluate_strategies.py` defaults to a wider, sector-diverse validation universe
+(`settings.research.backtest_universe`, ~27 symbols) — separate from the live watchlist,
+which stays small and explicit. Run it after any strategy-logic change:
+
+    python -m scripts.evaluate_strategies
+
+A "validated" verdict is a floor to clear, not authorization to trade live.
 
 ## Sentiment gate (non-executing)
 
@@ -47,8 +131,12 @@ reduces confidence (and thus size). **The AI never triggers a trade.**
 > Backtest integrity: LLM sentiment cannot be honestly backtested on history (look-ahead).
 > Plan: backtest the price strategies clean, then layer sentiment forward-only in paper.
 
-## Open definitions (pin down before coding each strategy)
+## Decided (previously open definitions)
 
-- Precise "confirmation candle" / "rejection candle" rules.
-- Exact "recent" support/resistance detection for breakout.
-- Shorts in v1 vs longs-only first.
+- **Confirmation/rejection candle:** precise now — see "Confirmation candle" above.
+- **"Recent" support/resistance for breakout:** the prior `sr_lookback` bars (default 20,
+  `strategies.yaml -> strategies.breakout.indicators.sr_lookback`), excluding the current bar.
+- **Shorts:** longs-only for this validation pass (`symbols.yaml -> defaults.allow_short:
+  false`). All three strategies implement short-side logic and `shorts_allowed()` is
+  per-symbol overridable, but it has not traded — live, paper, or backtest — under any
+  config to date. Revisit as a deliberate follow-up once the long side has a real verdict.
