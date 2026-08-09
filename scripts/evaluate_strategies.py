@@ -32,7 +32,9 @@ log = get_logger("evaluate")
 _BENCHMARK = "SPY"
 
 
-def _build_features(symbols: list[str], lookback_days: int, offline: bool) -> dict[str, pd.DataFrame]:
+def _build_features(
+    symbols: list[str], lookback_days: int, offline: bool, full_refetch: bool = False
+) -> dict[str, pd.DataFrame]:
     conn = store.connect()
     config = load_config()
     out: dict[str, pd.DataFrame] = {}
@@ -40,7 +42,9 @@ def _build_features(symbols: list[str], lookback_days: int, offline: bool) -> di
         if not offline:
             try:
                 from src.data.ingest import ingest_symbol
-                rep = ingest_symbol(conn, sym, lookback_days=lookback_days)
+                rep = ingest_symbol(
+                    conn, sym, lookback_days=lookback_days, incremental=not full_refetch
+                )
                 log.info("ingested %s: %d rows (%d gaps)", sym, rep.rows, rep.gap_count)
             except Exception as exc:  # data/creds problem -- fall back to cache
                 log.warning("ingest failed for %s (%s); using cached bars", sym, exc)
@@ -68,6 +72,10 @@ def main() -> None:
                              f"{len(default_symbols)} symbols)")
     parser.add_argument("--lookback-days", type=int, default=default_lookback)
     parser.add_argument("--offline", action="store_true", help="use only cached bars; no data fetch")
+    parser.add_argument("--full-refetch", action="store_true",
+                        help="ignore the incremental cache and pull the full --lookback-days "
+                             "window fresh (use this to widen history; plain runs only fetch "
+                             "since the newest cached bar regardless of --lookback-days)")
     parser.add_argument("--bootstrap", type=int, default=5000, help="bootstrap resamples")
     parser.add_argument("--buckets", type=int, default=4, help="time-buckets for consistency")
     parser.add_argument("--min-trades", type=int, default=30, help="trades required for 'validated'")
@@ -86,7 +94,7 @@ def main() -> None:
 
     print(f"Building features for {len(symbols)} symbol(s)"
           f"{' (offline)' if args.offline else ''}...")
-    features = _build_features(symbols, args.lookback_days, args.offline)
+    features = _build_features(symbols, args.lookback_days, args.offline, args.full_refetch)
     if not features:
         print("No usable bar data. Run once without --offline to populate the cache, "
               "or check your data credentials.")
