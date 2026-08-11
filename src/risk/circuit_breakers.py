@@ -15,6 +15,12 @@ from __future__ import annotations
 import time
 from collections import deque
 from dataclasses import dataclass
+from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
+
+# Trading-day boundary for the per-day order cap, ET to match the market
+# session (same convention as src/core/clock.py, src/data/ingest.py).
+_ET = ZoneInfo("America/New_York")
 
 
 @dataclass(frozen=True)
@@ -43,6 +49,7 @@ class CircuitBreakers:
 
         self._order_times: deque[float] = deque()
         self._orders_today = 0
+        self._order_day: date | None = None  # ET calendar date _orders_today belongs to
         self._consecutive_errors = 0
 
     # --- daily loss kill switch ---
@@ -73,6 +80,7 @@ class CircuitBreakers:
     def check_rate_limits(self, now: float | None = None) -> BreakerStatus:
         now = now if now is not None else time.time()
         self._expire(now)
+        self._roll_day(now)
         if len(self._order_times) >= self.max_orders_per_minute:
             return BreakerStatus(False, f"rate limit: {self.max_orders_per_minute} orders/min")
         if self._orders_today >= self.max_orders_per_day:
@@ -81,12 +89,30 @@ class CircuitBreakers:
 
     def register_order(self, now: float | None = None) -> None:
         now = now if now is not None else time.time()
+        self._roll_day(now)
         self._order_times.append(now)
         self._orders_today += 1
+
+    def _roll_day(self, now: float) -> None:
+        """Reset the per-day counter when the ET calendar date changes.
+
+        Self-healing by design: a one-shot scheduled cycle gets a fresh
+        process each day so this never even triggers, but the always-on
+        Telegram listener (src/core/trade_service.py) builds ONE
+        CircuitBreakers for the life of the process -- without this, its
+        `_orders_today` would accumulate across calendar days forever and
+        `max_orders_per_day` would eventually trip permanently, vetoing every
+        future order with a misleading "rate limit" reason on a brand-new day.
+        """
+        today = datetime.fromtimestamp(now, tz=timezone.utc).astimezone(_ET).date()
+        if self._order_day != today:
+            self._orders_today = 0
+            self._order_day = today
 
     def reset_day(self) -> None:
         self._order_times.clear()
         self._orders_today = 0
+        self._order_day = None
 
     def _expire(self, now: float) -> None:
         while self._order_times and now - self._order_times[0] > 60.0:
