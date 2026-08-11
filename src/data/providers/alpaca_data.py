@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 
+from src.common.errors import retry_transient
 from src.common.secrets import MarketDataCredentials, load_market_data_credentials
 
 _OHLCV = ["open", "high", "low", "close", "volume"]
@@ -83,7 +84,9 @@ class AlpacaData:
             adjustment=Adjustment.ALL,  # split + dividend adjusted
             feed=self._creds.feed,
         )
-        bars = self._get_client().get_stock_bars(request)
+        # Read-only: retry a transient network blip instead of letting one
+        # dropped connection stale-out the whole symbol batch for the cycle.
+        bars = retry_transient(lambda: self._get_client().get_stock_bars(request))
         df = bars.df
         empty = pd.DataFrame(columns=_OHLCV)
         if df.empty:

@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests (offline, no creds required)
+        run: pytest -q
+
+      # Lint/type-check are informational for now (136 ruff / 30 mypy findings
+      # pre-date this workflow, mostly import-order and Optional/list-variance
+      # issues) -- they run so drift is visible in every PR, but don't block
+      # merges until a dedicated cleanup pass lands. Tighten with
+      # `continue-on-error: false` once that pass is done.
+      - name: Lint (ruff, informational)
+        if: always()
+        continue-on-error: true
+        run: ruff check .
+
+      - name: Type-check (mypy, informational)
+        if: always()
+        continue-on-error: true
+        run: mypy src --ignore-missing-imports

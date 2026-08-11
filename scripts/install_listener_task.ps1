@@ -6,7 +6,7 @@
 # This is an alternative to the no-admin Startup-folder launcher
 # (TradingTelegramListener.vbs); use ONE or the other, not both.
 
-$proj = "C:\Users\zeela\Downloads\Claude-livetradingbot"
+$proj = Split-Path -Parent $PSScriptRoot
 $py   = "$proj\.venv\Scripts\python.exe"
 $log  = "$proj\logs\telegram.log"
 $arg  = "/c `"`"$py`" -m scripts.run_telegram >> `"$log`" 2>&1`""

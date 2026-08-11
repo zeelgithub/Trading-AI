@@ -48,6 +48,11 @@ watchdog:
   cycle_grace_minutes: 45         # missed-cycle alarm this long after evaluate_at
   listener_max_age_seconds: 300   # Telegram listener heartbeat older => "down"
   alert_cooldown_minutes: 360     # same issue set re-alerts at most this often
+  # Optional: a free https://healthchecks.io (or similar) check URL. On every
+  # HEALTHY probe, healthcheck.py pings it -- so if the machine is asleep/off
+  # or Task Scheduler never fires the probe at all, THAT service pages you
+  # instead of silence. Unset by default (no external dependency unless opted in).
+  dead_mans_switch_url: null
 
 self_heal:
   # Gates for scripts/run_self_heal.py's verified auto-resume (stale_data /

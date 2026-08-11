@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from src.common.errors import retry_transient
 from src.common.jsonio import atomic_write_json, load_json_or_quarantine
 from src.common.logging import get_logger
 
@@ -103,7 +104,8 @@ class SymbolResolver:
         if self.broker is None:
             return {}
         try:
-            assets = {a.symbol.upper(): a.name for a in self.broker.list_assets() if a.tradable}
+            catalog = retry_transient(self.broker.list_assets)
+            assets = {a.symbol.upper(): a.name for a in catalog if a.tradable}
         except Exception as exc:
             log.warning("could not fetch asset catalog: %s", exc)
             return {}

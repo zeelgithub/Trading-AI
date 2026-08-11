@@ -75,6 +75,23 @@ def _should_alert(fingerprint: str, now_utc: pd.Timestamp, cooldown_minutes: int
     return True
 
 
+def _ping_dead_mans_switch(url: str) -> None:
+    """Best-effort GET ping on a HEALTHY probe. healthcheck.py itself can't
+    detect "the scheduled task never fired" or "the machine is off" -- an
+    external dead-man's-switch (e.g. https://healthchecks.io free tier) can,
+    by alerting when expected pings stop arriving. No-op unless configured;
+    never raises (a ping failure must not make an otherwise-healthy probe
+    exit non-zero)."""
+    if not url:
+        return
+    try:
+        import requests
+
+        requests.get(url, timeout=5)
+    except Exception as exc:
+        log.warning("dead man's switch ping failed: %s", exc)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Independent bot health probe.")
     parser.add_argument("--no-alert", action="store_true",
@@ -107,6 +124,7 @@ def main() -> int:
 
     if not issues:
         print("healthy: cycle on schedule, listener alive, data fresh, not halted")
+        _ping_dead_mans_switch(str(wd.get("dead_mans_switch_url") or ""))
         return 0
 
     lines = [i.text() for i in issues]

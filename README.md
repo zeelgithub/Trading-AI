@@ -81,7 +81,11 @@ Data/Research  ->  Strategy/Signal  ->  Risk Gatekeeper  ->  Execution  ->  Alpa
 
 ## Getting started
 
-1. **Install**: Python 3.11+, `pip install -r requirements.txt`.
+1. **Install**: Python 3.11+, `pip install -r requirements.txt`. For a
+   reproducible install on the machine that actually runs the scheduled
+   tasks, use `pip install -r requirements.lock.txt` instead (exact versions
+   last verified together; regenerate it after intentionally upgrading a
+   dependency).
 2. **Credentials**: copy `.env.example` to `.env`. At minimum you need a free
    [Alpaca paper account](https://alpaca.markets) for `ALPACA_API_KEY_ID` /
    `ALPACA_API_SECRET_KEY`. Telegram and news/sentiment keys are optional.

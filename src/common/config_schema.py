@@ -40,6 +40,7 @@ class _Lenient(BaseModel):
 
 class AccountLimits(_Lenient):
     max_daily_loss_pct: float = Field(4.0, gt=0, le=100)
+    max_open_risk_pct: float | None = Field(None, gt=0, le=100)
     max_gross_exposure_pct: float = Field(175.0, gt=0)
     max_open_positions: int = Field(10, gt=0)
 
@@ -128,6 +129,11 @@ class WatchdogSettings(_Lenient):
     cycle_grace_minutes: int = Field(45, gt=0)
     listener_max_age_seconds: int = Field(300, gt=0)
     alert_cooldown_minutes: int = Field(360, gt=0)
+    # Optional dead-man's-switch: if set, a HEALTHY probe pings this URL (e.g.
+    # a free healthchecks.io check). That service pages YOU if the ping itself
+    # stops arriving -- the one failure mode healthcheck.py can't detect on
+    # its own (the machine is off, or the scheduled task never fires).
+    dead_mans_switch_url: str | None = None
 
 
 class ApprovalSettings(_Lenient):

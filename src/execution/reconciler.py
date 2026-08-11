@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from src.common.errors import retry_transient
 from src.common.models import Side
 from src.execution.broker_alpaca import BrokerInterface
 from src.execution.order_manager import PositionStatus
@@ -58,8 +59,10 @@ class Reconciler:
     def reconcile(self, positions: dict) -> ReconcileReport:
         """`positions` maps symbol -> ManagedPosition (duck-typed: needs
         .status, .side, .qty, .filled_qty)."""
-        broker_positions = {p.symbol: p for p in self.broker.list_positions()}
-        open_orders = self.broker.list_open_orders()
+        # Read-only calls: safe to retry on a transient network blip instead of
+        # halting the whole cycle over one dropped connection.
+        broker_positions = {p.symbol: p for p in retry_transient(self.broker.list_positions)}
+        open_orders = retry_transient(self.broker.list_open_orders)
         order_symbols = {o.symbol for o in open_orders}
         stop_symbols = {o.symbol for o in open_orders if "stop" in o.type}
 

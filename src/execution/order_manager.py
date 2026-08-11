@@ -16,6 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
+from src.common.errors import retry_transient
 from src.common.models import Decision, RiskDecision, Side
 from src.execution.broker_alpaca import BrokerInterface
 
@@ -91,6 +92,14 @@ class OrderManager:
         symbol = intent.symbol
         stop_level = ratchet.stop
 
+        # Deliberately NOT wrapped in retry_transient: if the request reached
+        # the broker but the response was lost to the network blip, a blind
+        # retry could submit a second entry. `_coid` makes retries idempotent
+        # at the broker (duplicate client_order_id is rejected, not
+        # duplicated), but that rejection isn't a transient status either, so
+        # it would still surface as an error here -- default-to-halt (rule 3)
+        # and a human/reconciler confirming what actually happened at the
+        # broker is safer than guessing.
         parent = self.broker.submit_protected_entry(
             symbol, qty, side, stop_level, intent.take_profit,
             _coid(symbol, intent.strategy, tag, "entry"),
@@ -125,7 +134,7 @@ class OrderManager:
         immediately, instead of waiting for the next reconcile pass to notice
         the order vanished and halt on an unexplained "pending_lost".
         """
-        order = self.broker.get_order(position.entry_order_id)
+        order = retry_transient(lambda: self.broker.get_order(position.entry_order_id))
         position.filled_qty = order.filled_qty
         position.last_order_status = order.status
         if order.filled_qty and order.filled_qty > 0:
