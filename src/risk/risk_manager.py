@@ -32,6 +32,11 @@ class AccountState:
     last_price: float
     open_positions: int = 0
     gross_exposure_value: float = 0.0
+    # Sum of qty * |entry - current_stop| across all currently open/pending
+    # positions -- i.e. the realized loss IF every held position's resting
+    # stop fired today. Defaults to 0.0 (no-op / not tracked) for callers that
+    # don't yet compute it; see RiskManager.evaluate() step 7.5.
+    open_risk_dollars: float = 0.0
     is_intraday: bool = False
     as_of: date = field(default_factory=date.today)
     day_trade_count: int | None = None  # broker-reported, for reconciliation
@@ -119,10 +124,21 @@ class RiskManager:
         if not ff.ok:
             return _veto(intent, ff.reason)
 
-        # 7. Risk-based sizing. Equal-risk budget uses the per-strategy slice.
+        # 7. Risk-based sizing. Equal-risk budget uses the per-strategy slice,
+        #    scaled by the intent's confidence -- a weaker signal risks less of
+        #    the budget, never more (confidence is clamped to [0,1] by
+        #    Intent.validate(), so this only ever shrinks). This is what makes
+        #    the sentiment gate's confidence haircut (SentimentGate.apply) and
+        #    each strategy's own conviction (e.g. trend_following's ADX-scaled
+        #    confidence) actually affect risk-taking rather than being a value
+        #    that's computed and carried around but never consumed -- see
+        #    docs/STRATEGIES.md "Sentiment gate". A manual/phone buy always
+        #    passes confidence=1.0 (a human already decided), so it is
+        #    unaffected by this.
         per_trade_risk = float(
             alloc.get("per_strategy_risk_pct", pos.get("per_trade_risk_pct", 1.0))
         )
+        per_trade_risk *= max(0.0, min(1.0, intent.confidence))
         max_position_pct = float(pos.get("max_position_pct", 10.0))
         sizing = position_sizer.size_position(
             equity=account.equity,
@@ -135,6 +151,34 @@ class RiskManager:
         qty = sizing.qty
         if qty <= 0:
             return _veto(intent, f"sized to zero (capped by {sizing.capped_by})")
+        # Tracks WHICH cap most recently shrank qty, so the final `reason`
+        # reflects the actual binding constraint -- not just whichever cap
+        # happened to run first. Every step below only ever tightens qty
+        # further, so the last write here is always the real answer.
+        capped_by = sizing.capped_by
+
+        # 7.5 Aggregate open-risk cap: bound what EVERY held position's stop
+        # firing on the same day would actually cost, so max_daily_loss_pct
+        # (the kill switch, checked once per cycle -- see docs/SAFEGUARDS.md)
+        # is a real ceiling and not just a same-day trigger that assumes stops
+        # don't cluster. Defaults to max_daily_loss_pct itself so the two stay
+        # coherent without a second number to separately tune. Callers that
+        # don't populate AccountState.open_risk_dollars leave it at 0.0 (safe
+        # no-op -- unchanged behavior, not a false "no risk" pass).
+        max_open_risk_pct = float(acct.get("max_open_risk_pct", self.breakers.max_daily_loss_pct))
+        max_open_risk_value = account.equity * (max_open_risk_pct / 100.0)
+        risk_per_share = abs(entry - stop)
+        risk_room = max_open_risk_value - account.open_risk_dollars
+        if risk_room <= 0:
+            return _veto(intent, "aggregate open-risk limit reached")
+        max_qty_by_open_risk = int(risk_room // risk_per_share) if risk_per_share > 0 else qty
+        resized = False
+        if qty > max_qty_by_open_risk:
+            qty = max_qty_by_open_risk
+            capped_by = "aggregate_open_risk"
+            resized = True
+        if qty <= 0:
+            return _veto(intent, "aggregate open-risk leaves no room for one share")
 
         # 8. Gross-exposure cap -- shrink to fit, else veto.
         max_gross_pct = float(acct.get("max_gross_exposure_pct", 175.0))
@@ -143,9 +187,9 @@ class RiskManager:
         if room <= 0:
             return _veto(intent, "gross exposure limit reached")
         max_qty_by_gross = int(room // entry)
-        resized = False
         if qty > max_qty_by_gross:
             qty = max_qty_by_gross
+            capped_by = "gross_exposure"
             resized = True
         if qty <= 0:
             return _veto(intent, "gross exposure leaves no room for one share")
@@ -158,7 +202,7 @@ class RiskManager:
             intent=intent,
             decision=decision,
             approved_qty=float(qty),
-            reason=f"sized by {sizing.capped_by}; stop={stop:.2f}",
+            reason=f"sized by {capped_by}; stop={stop:.2f}",
         )
 
     # --- post-execution registration (called by orchestrator on a real fill) ---

@@ -10,6 +10,14 @@ The scorer is injected (a callable symbol -> int). With no scorer wired, every
 symbol scores 0 (neutral) so the gate is a safe no-op pass-through with a small
 confidence haircut.
 
+`on_feed_unavailable: skip_gate` (config/strategies.yaml): if a wired scorer
+RAISES (network/API error, not just "no scorer configured"), the gate passes the
+intent through completely unchanged for that symbol -- no haircut, no block. A
+transient sentiment-feed outage must never block trading or count toward the
+cycle's consecutive-error breaker the way a real logic error should; that is a
+materially different failure ("couldn't ask") from a genuine neutral score
+("asked, no signal either way").
+
 Boundary: places orders NO, can only veto/shrink, never originate.
 """
 
@@ -19,9 +27,12 @@ from dataclasses import replace
 from typing import Callable
 
 from src.common.config import Config
+from src.common.logging import get_logger
 from src.common.models import Intent, Side
 
 _NEUTRAL_HAIRCUT = 0.8
+
+log = get_logger("sentiment_gate")
 
 
 class SentimentGate:
@@ -34,6 +45,8 @@ class SentimentGate:
         self._scorer = scorer
 
     def score(self, symbol: str) -> int:
+        """Raises if a wired scorer fails -- see apply()'s on_feed_unavailable
+        handling, which is where that distinction actually matters."""
         if self._scorer is None:
             return 0
         return max(-1, min(1, int(self._scorer(symbol))))
@@ -42,7 +55,14 @@ class SentimentGate:
         """Return the (possibly confidence-adjusted) intent, or None if blocked."""
         if not self.enabled:
             return intent
-        s = self.score(intent.symbol)
+        try:
+            s = self.score(intent.symbol)
+        except Exception as exc:
+            log.warning(
+                "sentiment scorer failed for %s (%s) -- on_feed_unavailable=skip_gate, "
+                "passing the intent through unchanged this cycle", intent.symbol, exc,
+            )
+            return intent
 
         if intent.side == Side.LONG and s < self.long_requires_min:
             return None

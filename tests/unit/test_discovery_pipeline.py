@@ -38,7 +38,7 @@ def _congress(symbol, score):
 
 def _held_pos():
     return SimpleNamespace(status=PositionStatus.OPEN, filled_qty=10, qty=10,
-                           ratchet=SimpleNamespace(entry=50.0))
+                           ratchet=SimpleNamespace(entry=50.0, stop=45.0))
 
 
 def _pipeline(contributions, *, top_n=2, min_score=25.0):

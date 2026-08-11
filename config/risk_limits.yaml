@@ -3,7 +3,18 @@
 
 account:
   # Hard kill switch: realized + unrealized loss vs start-of-day equity.
+  # Checked once per cycle (a daily-swing system) -- NOT a continuous
+  # intraday guard. On its own this bounds "new risk added today", not "what
+  # every held position's stop could cost if they all fired the same day" --
+  # that second number is bounded separately by max_open_risk_pct below, so
+  # the 4% figure is a real worst-case ceiling, not just a same-day trigger.
   max_daily_loss_pct: 4.0
+  # Sum of qty * |entry - stop| across ALL open positions, enforced at entry
+  # time (RiskManager.evaluate() step 7.5) -- caps the worst case where every
+  # held position's resting stop fires on the same day (e.g. a broad market
+  # selloff). Defaults to max_daily_loss_pct itself if omitted, so the two
+  # numbers stay coherent by construction rather than needing separate tuning.
+  max_open_risk_pct: 4.0
   max_gross_exposure_pct: 175.0     # sum of |positions| vs equity (intraday margin up to 4x)
   max_open_positions: 10
 

@@ -6,8 +6,21 @@ a great strategy with no controls eventually does not. Config:
 
 ## Tier 1 — Pre-trade gates (block bad orders before they send)
 
-- **Max daily loss (kill switch):** realized + unrealized P&L vs start-of-day equity.
-  Cross it -> state `HALTED`, cancel open orders, optionally flatten, **require manual reset**.
+- **Max daily loss (kill switch):** realized + unrealized P&L vs start-of-day equity,
+  checked once per cycle (a daily-swing system, not a continuous intraday monitor).
+  Cross it -> state `HALTED`, cancel open orders, flatten (in execute mode),
+  **require manual reset**. On its own this bounds *new* risk added since the last
+  check, not what already-held positions could cost if they all stopped out the
+  same day between cycles — that's the next guard.
+- **Max aggregate open risk:** `account.max_open_risk_pct` (defaults to
+  `max_daily_loss_pct`) caps the sum of `qty * |entry - stop|` across every open
+  position, enforced at entry time (`RiskManager.evaluate()` step 7.5, before a
+  new position is even opened). This is what makes the kill-switch percentage a
+  real worst-case ceiling: even if every held position's resting stop fired on
+  the same day (e.g. a broad market selloff, each position's stop is independent
+  and unrelated to the portfolio-level kill switch — see "hybrid execution" at
+  the bottom of `config/risk_limits.yaml`), the realized loss is bounded near
+  that percentage rather than scaling unbounded with `max_open_positions`.
 - **Max position / per-symbol exposure** caps.
 - **Max gross exposure / leverage** cap.
 - **Fat-finger band:** reject orders priced > 20% off last quote.
@@ -24,7 +37,12 @@ a great strategy with no controls eventually does not. Config:
   *every* checked symbol is stale the cycle HALTs (`stale_data`, auto-resumable
   by the verified self-healer once data is fresh again).
 - **Watchdog:** `scripts/healthcheck.py` is an independent liveness check
-  (schedule it separately from the bot itself).
+  (schedule it separately from the bot itself). Known gap: it is itself just
+  another scheduled task, so it can't detect "the machine is asleep/off" or
+  "Task Scheduler never fired the probe at all" -- set
+  `watchdog.dead_mans_switch_url` (e.g. a free healthchecks.io check) to close
+  that gap; a HEALTHY probe pings it, and that external service alerts you if
+  the expected ping itself goes missing.
 - **Crash-safe state files:** all `state/*.json` writes are atomic
   (temp + rename); a corrupt file is quarantined, never trusted — recovery goes
   through reconciliation, which halts on anything unexpected.

@@ -99,27 +99,78 @@ This is the single precision bar `initial_stop_pct`-style tuning applies to; rai
 
 ## Validation status
 
-Not statistically validated as of this writing. Latest real run (27-symbol research
-universe, ~14 months, after the regime-threshold and entry-timing fixes above):
+Updated 2026-08-10 (latest of three re-runs same day — widened history, then two
+risk-layer changes that both affect which trades clear the gate; see "Recent
+risk-layer changes" below). `--full-refetch --lookback-days 1500` (~4.1 years,
+1029 trading days, vs. the original 14-month/8-trade window), 27-symbol research
+universe + SPY:
 
-| strategy | trades | verdict |
-|---|---|---|
-| breakout | 63 | NOISE (p=0.64) |
-| mean_reversion | 9 | NOISE (p=0.96, too few trades to say anything) |
-| trend_following | 3 | NOISE (p=1.00, too few trades to say anything) |
+| strategy | trades | win% | PF | p(adj) | verdict |
+|---|---|---|---|---|---|
+| trend_following | 42 | 45.2 | 3.51 | 0.045 | **VALIDATED** |
+| breakout | 179 | 39.7 | 1.71 | 0.055 | INCONCLUSIVE (just above the 0.05 bar) |
+| mean_reversion | 47 | 38.3 | 0.57 | 1.000 | NOISE — and net-negative (PF < 1) |
 
-None clear the evaluation pipeline's own `min_trades=30` significance bar. This is an
-honest reflection of a genuinely selective, multi-condition daily-swing system over a
-14-month window, not a result that was tuned to look better than it is — no parameter
-was loosened purely to inflate trade count once the two genuine timing bugs above were
-fixed. The realistic next step is a longer backtest history (multi-year) and/or a longer
-live paper-trading track record, not further parameter loosening.
+Portfolio (all three combined): +38.4% return, Sharpe 1.34, maxDD -5.4%, 268 trades.
+Buy-and-hold SPY over the same window: +113.5% return, Sharpe 1.24. The strategies
+underperform on raw return but beat SPY's Sharpe with roughly a third of its
+drawdown — expected, since the risk gate caps exposure (max 10 positions, a
+fraction of budget risked each, further rationed by the aggregate open-risk cap
+below) rather than staying 100%-invested like a passive benchmark; it is not
+evidence the bot is broken, but it does mean "beats SPY on return" is not a claim
+this system can make.
+
+### Recent risk-layer changes (both same day, both affect the numbers above)
+
+- **Confidence-scaled sizing** (`src/risk/risk_manager.py` `evaluate()` step 7):
+  every strategy computes a `confidence` on its Intent (trend_following scales it
+  with ADX strength; breakout and mean_reversion currently emit a fixed value),
+  and the sentiment gate applies a haircut when sentiment is neutral
+  (`_NEUTRAL_HAIRCUT = 0.8` in `src/strategy/sentiment_gate.py` — the default
+  today, since no sentiment source is wired). This was previously computed and
+  threaded through the whole pipeline but never consumed — sizing always risked
+  the flat per-strategy budget regardless. Now the risk budget is scaled by
+  `intent.confidence` (clamped to [0,1], so it only ever shrinks, never amplifies
+  — consistent with rule 2: signal/sentiment layers shrink or block, never
+  originate or enlarge). A manual/phone buy (`trade_service.place_manual`) always
+  passes `confidence=1.0` and is unaffected.
+- **Aggregate open-risk cap** (`evaluate()` step 7.5, `account.max_open_risk_pct`
+  in `config/risk_limits.yaml`, defaults to `max_daily_loss_pct`): bounds the sum
+  of `qty * |entry - stop|` across ALL open positions, so a broad selloff hitting
+  every held position's stop the same day is capped near the kill switch's own
+  4% threshold — previously the kill switch (`max_daily_loss_pct`) only checked
+  once per cycle against realized+unrealized loss and only blocked *new* entries;
+  nothing capped how much simultaneous stop-outs across up to `max_open_positions`
+  (10) could cost. See docs/SAFEGUARDS.md.
+
+Together these shifted WHICH trades clear the portfolio-level risk budget on a
+given day (fewer breakout trades got through, 203→179; trend_following dropped
+from 50→42 similarly) — not a strategy-logic change. The maxDD improvement
+(-8.3% pre-change → -5.4%) is the aggregate-risk cap doing its job.
+
+Reading:
+- **trend_following** now clears `min_trades=30` with a real, Sidak-adjusted
+  p < 0.05 and the highest profit factor (3.51) of the three — the first strategy
+  in this project with a statistically real edge on backtest data. Still "a floor
+  to clear, not a green light to go live" (below).
+- **breakout** is a genuine borderline case sitting just past the significance
+  threshold — worth more history or live paper-trading data before promoting or
+  dropping it, not more parameter tuning.
+- **mean_reversion** remains net-negative (PF 0.57) across both re-runs. A real
+  candidate for `/review` → disable via rotation (`state/rotation.json`,
+  human-approved, never automatic) rather than further tuning.
+
+None of this was tuned to look better than it is — no strategy parameter was
+touched in any of today's three re-runs; only the history window and (separately)
+two risk-layer fixes changed, and the fixes were made because they were real gaps,
+not to move these numbers.
 
 `scripts/evaluate_strategies.py` defaults to a wider, sector-diverse validation universe
 (`settings.research.backtest_universe`, ~27 symbols) — separate from the live watchlist,
-which stays small and explicit. Run it after any strategy-logic change:
+which stays small and explicit. Re-run after any strategy-logic OR risk-logic change,
+or periodically to extend the window as more live history accumulates:
 
-    python -m scripts.evaluate_strategies
+    python -m scripts.evaluate_strategies --full-refetch --lookback-days 1500
 
 A "validated" verdict is a floor to clear, not authorization to trade live.
 

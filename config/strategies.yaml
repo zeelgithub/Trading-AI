@@ -103,9 +103,12 @@ sentiment_gate:
     long_requires_min: 0        # longs require sentiment >= 0
     short_requires_max: 0       # shorts require sentiment <= 0
     conflict_action: reduce_confidence
-  on_feed_unavailable: skip_gate # fail-safe behavior when news/LLM is down (TBD-confirm)
+  # Fail-safe when a wired scorer raises (network/API error): pass the intent
+  # through this cycle unchanged rather than block/haircut/halt on an infra
+  # hiccup. Implemented in SentimentGate.apply() (src/strategy/sentiment_gate.py) --
+  # currently the only behavior; this key documents the contract rather than
+  # switching between options.
+  on_feed_unavailable: skip_gate
 
 # Open definitions still to pin down before coding each strategy:
-#   - precise "confirmation candle" / "rejection candle" rules
 #   - exact "recent" S/R detection for breakout
-#   - shorts in v1 vs longs-only first

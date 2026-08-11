@@ -39,11 +39,16 @@ def test_winning_trend_trade():
     t = result.trades[0]
     assert t.side == "long"
     assert t.reason == "stop"
-    assert t.qty == 100                      # 10% max-position cap: 10k/100
+    # adx=35 -> strategy confidence 0.65; no sentiment scorer wired -> neutral
+    # haircut *0.8 -> 0.52. Risk-based sizing (per_strategy_risk_pct 1.33% *
+    # 0.52 = 0.6916% of 100k = $691.6 / $10 risk-per-share) -> 69 shares,
+    # tighter than the 100-share max-position cap this used to hit before
+    # confidence-scaled sizing was wired in (see src/risk/risk_manager.py).
+    assert t.qty == 69
     assert t.entry_price == pytest.approx(100.0)
     assert t.exit_price == pytest.approx(110.0)
-    assert t.pnl == pytest.approx(1000.0)    # (110-100) * 100
+    assert t.pnl == pytest.approx(690.0)     # (110-100) * 69
 
-    assert result.equity_curve.iloc[-1] == pytest.approx(101_000.0)
+    assert result.equity_curve.iloc[-1] == pytest.approx(100_690.0)
     assert result.metrics["num_trades"] == 1
     assert result.metrics["win_rate"] == pytest.approx(1.0)

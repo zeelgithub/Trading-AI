@@ -25,8 +25,35 @@ De-risked order of construction. Each step is testable before the next.
 - [x] Step 4: regime filter + 3 strategies + sentiment gate (paper-shadow) — 59 tests pass; scan_signals runs full chain on live data, keys rotated
 - [x] Step 5: orchestrator (state machine, reconcile, kill switch, ratchet raise, exec guards, state persistence) — 69 tests pass; ran live in SHADOW, no orders
 - [x] Step 6: backtester + metrics (event-driven, next-open fills, reuses live components) — 73 tests pass
-- [ ] Step 6b: VALIDATION — more history (SIP/longer), more symbols, walk-forward. First run was weak (8 trades, PF 1.17, all breakout) — NOT proven. Do not --execute yet.
-- [ ] Step 7: paper EXECUTE smoke (--execute) ONLY after validation passes; then small real capital
+- [x] Step 6b: VALIDATION — re-run 2026-08-10 with 27 symbols + SPY over ~4.1 years
+  (`--full-refetch --lookback-days 1500`, up from the original 8-trade/14-month run).
+  Final numbers (post Step 6c + 6d below): trend_following VALIDATED (42 trades,
+  PF 3.51, Sidak-adjusted p=0.045); breakout INCONCLUSIVE (179 trades, PF 1.71,
+  p=0.055 — just past the bar); mean_reversion NOISE and net-negative (47 trades,
+  PF 0.57). Portfolio: +38.4% return, Sharpe 1.34, maxDD -5.4% vs. buy-and-hold
+  SPY's +113.5%/1.24 — underperforms on raw return, beats SPY's Sharpe with a much
+  smaller drawdown. Full detail in docs/STRATEGIES.md "Validation status".
+  Do not --execute yet: one strategy clearing the bar is a floor, not a green light —
+  see Step 7.
+- [x] Step 6c: confidence-scaled position sizing (`src/risk/risk_manager.py`
+  `evaluate()` step 7) — `intent.confidence` (strategy conviction + sentiment-gate
+  haircut) now scales the risk budget instead of being computed and ignored; clamped
+  so it only ever shrinks, never exceeds the configured per-strategy budget. Manual/
+  phone buys pin `confidence=1.0` and are unaffected. See docs/STRATEGIES.md
+  "Confidence-scaled sizing".
+- [x] Step 6d: aggregate open-risk cap (`evaluate()` step 7.5, new
+  `account.max_open_risk_pct` in `config/risk_limits.yaml`, defaults to
+  `max_daily_loss_pct`) — bounds the sum of qty*|entry-stop| across ALL open
+  positions, so a same-day selloff hitting every held stop is capped near the
+  kill switch's own threshold. Previously `max_daily_loss_pct` only checked
+  once/cycle against realized+unrealized loss and only blocked new entries;
+  nothing capped simultaneous stop-outs across up to `max_open_positions` (10).
+  See docs/SAFEGUARDS.md and docs/STRATEGIES.md "Recent risk-layer changes".
+- [ ] Step 7: paper EXECUTE smoke (--execute) ONLY after validation passes; then small real capital.
+  Candidate next moves before that: disable mean_reversion via `/review` (human-approved
+  rotation, not automatic) since it is now net-negative rather than just under-sampled;
+  let trend_following accumulate more live/backtest history before deciding; still no
+  strategy has a live paper-trading track record backing the backtest verdict.
 
 ## Agentic orchestrator rebuild (in progress)
 
@@ -39,8 +66,9 @@ agentic-rebuild memory. Phase by phase, each shipped with tests:
   significance,scoreboard,evaluation}.py`, `scripts/evaluate_strategies.py`):
   per-strategy attribution, bootstrap p-value, Probabilistic Sharpe Ratio, Sidak
   multiple-testing correction, temporal consistency, buy-and-hold benchmark, and
-  a persisted scoreboard with a noise/promising/validated verdict. Confirms the
-  Step-6b finding statistically: breakout on cached data = NOISE (p≈0.46).
+  a persisted scoreboard with a noise/promising/validated verdict. Updated by the
+  2026-08-10 Step-6b re-run: breakout on ~4.1 years of cached data = VALIDATED
+  (p≈0.04); see docs/STRATEGIES.md "Validation status".
 - [x] **Phase 0 — agent harness** (`src/agents/{model,tools,runtime,dispatch,
   profiles,catalog}.py`): generic short-lived tool-use loop, deterministic
   dispatcher, read/write tool tiers, fully offline-testable via a scripted model.
@@ -126,17 +154,30 @@ weights, congress filters, universe extras).
 - Connectivity/stale-data/heartbeat guards.
 - [x] Real alerts + phone control (Telegram, `src/notify/`): propose-and-approve,
   view positions/stops, `/buy`, `/halt`/`/reset`/`/flatten`. 110 tests pass.
-- `confidence` unused in sizing; sentiment scorer inert (no news source).
+- [x] `confidence` now used in sizing (Step 6c above). Sentiment scorer still inert
+  (no news/LLM source wired) — every automated entry gets the gate's neutral haircut
+  by default until one is.
+- [x] `on_feed_unavailable: skip_gate` implemented (`SentimentGate.apply()`, see
+  docs/STRATEGIES.md): a wired scorer that raises now passes the intent through
+  unchanged rather than propagating the exception — previously undefined in code
+  despite being documented in `config/strategies.yaml`; a sentiment-feed outage on
+  a multi-signal day could have tripped the consecutive-error breaker and halted
+  with EXCEPTION (manual reset only) over an infra hiccup, not a logic error.
 - Read-only account path (remove trading-cred construction in scan_signals / congress_copy).
 - Move remaining hardcoded params to config.
 
 ## Findings
-- First backtest (3 symbols, ~75 usable days after 200EMA warmup): trend-pullback and mean-reversion setups never fired — only breakout traded. Investigate whether pullback/MR entry conditions are too strict or the window too short.
+- (Resolved) First backtest (3 symbols, ~75 usable days after 200EMA warmup): trend-pullback
+  and mean-reversion setups never fired. Root cause was the same-bar entry-timing bug fixed
+  in docs/STRATEGIES.md "Entry timing" — both setups fire regularly now (50 and 48 trades
+  respectively in the 4.1-year validation run above).
+- mean_reversion fires and passes regime/confirmation checks, but is net-negative over 48
+  trades (PF 0.62) on the current window, not just under-sampled — see Step 6b.
 
 ## Open decisions
 
-- Confirmation/rejection candle precise definitions.
-- "Recent" S/R detection window for breakout.
-- Shorts in v1 vs longs-only first.
 - Stop vs stop-limit (gap-down risk).
-- Sentiment-feed-down behavior (skip gate vs halt).
+
+Resolved (see docs/STRATEGIES.md "Decided" and "Recent risk-layer changes"):
+confirmation/rejection candle definitions, "recent" S/R window for breakout,
+shorts-vs-longs-only, sentiment-feed-down behavior.

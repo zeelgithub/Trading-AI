@@ -27,6 +27,7 @@ from src.discovery.candidate import Candidate
 from src.discovery.scorer import Scorer
 from src.discovery.sources.base import CandidateSource
 from src.execution.order_manager import PositionStatus
+from src.risk.exposure import ExposureSnapshot, compute_exposure
 from src.risk.risk_manager import AccountState, RiskManager
 
 log = get_logger("discovery")
@@ -103,11 +104,11 @@ class DiscoveryPipeline:
         scored.sort(key=lambda c: c.score, reverse=True)
 
         proposals: list[Proposal] = []
-        gross, open_count = _exposure(positions)
+        exposure = _exposure(positions)
         for cand in scored:
             if len(proposals) >= self.top_n:
                 break
-            proposal = self._size_and_propose(cand, account, gross, open_count, skipped)
+            proposal = self._size_and_propose(cand, account, exposure, skipped)
             if proposal is not None:
                 proposals.append(proposal)
 
@@ -128,7 +129,9 @@ class DiscoveryPipeline:
                 cand.contributions.append(c)
         return by_symbol
 
-    def _size_and_propose(self, cand, account, gross, open_count, skipped) -> Proposal | None:
+    def _size_and_propose(
+        self, cand: Candidate, account: Account, exposure: ExposureSnapshot, skipped: list
+    ) -> Proposal | None:
         strategy, entry, stop = self._levels(cand)
         if entry is None or entry <= 0:
             skipped.append((cand.symbol, "no price"))
@@ -151,7 +154,8 @@ class DiscoveryPipeline:
         acct_state = AccountState(
             equity=account.equity, start_of_day_equity=account.last_equity,
             buying_power=account.buying_power, last_price=entry,
-            open_positions=open_count, gross_exposure_value=gross,
+            open_positions=exposure.open_count, gross_exposure_value=exposure.gross_value,
+            open_risk_dollars=exposure.open_risk_dollars,
             is_intraday=False, day_trade_count=account.daytrade_count,
         )
         decision = self.risk.evaluate(intent, acct_state)
@@ -194,13 +198,6 @@ class DiscoveryPipeline:
         return "congress_copy", float(price), float(price) * (1 - self.default_stop_pct / 100.0)
 
 
-def _exposure(positions: dict) -> tuple[float, int]:
-    gross = 0.0
-    count = 0
-    for pos in positions.values():
-        if pos.status == PositionStatus.CLOSED:
-            continue
-        qty = (pos.filled_qty or pos.qty)
-        gross += qty * getattr(pos.ratchet, "entry", 0.0)
-        count += 1
-    return gross, count
+def _exposure(positions: dict) -> ExposureSnapshot:
+    open_positions = (p for p in positions.values() if p.status != PositionStatus.CLOSED)
+    return compute_exposure(open_positions)

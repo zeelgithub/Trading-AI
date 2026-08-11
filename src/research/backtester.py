@@ -24,6 +24,7 @@ import pandas as pd
 from src.common.config import Config, load_config
 from src.common.models import Side
 from src.research.metrics import compute_metrics
+from src.risk.exposure import compute_exposure
 from src.risk.ratchet_stop import build_ratchet
 from src.risk.risk_manager import AccountState, RiskManager
 from src.strategy.regime_filter import RegimeFilter
@@ -161,7 +162,13 @@ class Backtester:
             return None
 
         last_price = float(hist.iloc[-1].close)
+        # Gross exposure here is live mark-to-market (today's close), deliberately
+        # different from the cost-basis gross the other RiskManager.evaluate()
+        # callers use -- see src/risk/exposure.py's module docstring. open_risk is
+        # NOT mark-to-market in any caller (it's always entry-vs-stop), so it comes
+        # from the shared helper like everywhere else.
         gross = self._unrealized(positions, feats_by_sym, today, market_value=True)
+        open_risk = compute_exposure(positions.values()).open_risk_dollars
         acct = AccountState(
             equity=equity,
             start_of_day_equity=equity,
@@ -169,6 +176,7 @@ class Backtester:
             last_price=last_price,
             open_positions=len(positions),
             gross_exposure_value=gross,
+            open_risk_dollars=open_risk,
             is_intraday=False,
         )
         decision = self.risk.evaluate(gated, acct)

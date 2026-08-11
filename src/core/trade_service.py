@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Callable
 
 from src.common.config import Config, load_config
+from src.common.errors import retry_transient
 from src.common.logging import AuditLog, get_logger
 from src.common.models import Action, Decision, Intent, RiskDecision, Side
 from src.common.proclock import DEFAULT_LOCK_PATH, BotBusy, bot_lock
@@ -32,6 +33,7 @@ from src.core.state_store import HaltClass, HaltStore, StateStore
 from src.core.symbols import ResolveResult, SymbolResolver
 from src.execution.broker_alpaca import BrokerInterface
 from src.execution.order_manager import OrderManager, PositionStatus, is_dead_entry
+from src.risk.exposure import ExposureSnapshot, compute_exposure
 from src.risk.ratchet_stop import PercentRatchet, build_ratchet
 from src.risk.risk_manager import AccountState, RiskManager
 
@@ -81,14 +83,9 @@ class StatusReport:
         return "\n".join(lines)
 
 
-def _gross_and_count(positions: dict) -> tuple[float, int]:
-    gross = sum(
-        (p.filled_qty or p.qty) * getattr(p.ratchet, "entry", 0.0)
-        for p in positions.values()
-        if p.status != PositionStatus.CLOSED
-    )
-    count = sum(1 for p in positions.values() if p.status != PositionStatus.CLOSED)
-    return gross, count
+def _exposure(positions: dict) -> ExposureSnapshot:
+    live = (p for p in positions.values() if p.status != PositionStatus.CLOSED)
+    return compute_exposure(live)
 
 
 class TradeService:
@@ -141,7 +138,9 @@ class TradeService:
 
     # --- read / control ---
     def status(self) -> StatusReport:
-        account = self.broker.get_account()
+        # Read-only: worth a couple of retries so a phone /status doesn't
+        # error out on one dropped connection.
+        account = retry_transient(self.broker.get_account)
         positions = self.store.load()
         rows = []
         for sym, p in positions.items():
@@ -160,7 +159,7 @@ class TradeService:
             last_equity=account.last_equity,
             buying_power=account.buying_power,
             halted=self.halt_store.is_halted(),
-            market_open=self.broker.is_market_open(),
+            market_open=retry_transient(self.broker.is_market_open),
             positions=rows,
         )
 
@@ -283,7 +282,7 @@ class TradeService:
         # queued overnight fills at the next open while its stop was priced off
         # the previous close -- a gap can multiply the intended risk. Refuse and
         # let the human approve during regular hours instead.
-        if not self.broker.is_market_open():
+        if not retry_transient(self.broker.is_market_open):
             return TradeResult(
                 False, "market_closed",
                 f"Market is closed -- not queueing {intent.symbol}. The stop would be "
@@ -291,12 +290,13 @@ class TradeService:
                 "sized risk. Approve again during market hours.",
                 intent.symbol,
             )
-        account = self.broker.get_account()
-        gross, open_count = _gross_and_count(positions)
+        account = retry_transient(self.broker.get_account)
+        exposure = _exposure(positions)
         acct_state = AccountState(
             equity=account.equity, start_of_day_equity=account.last_equity,
             buying_power=account.buying_power, last_price=price,
-            open_positions=open_count, gross_exposure_value=gross,
+            open_positions=exposure.open_count, gross_exposure_value=exposure.gross_value,
+            open_risk_dollars=exposure.open_risk_dollars,
             is_intraday=False, day_trade_count=account.daytrade_count,
         )
         decision = self.risk.evaluate(intent, acct_state)

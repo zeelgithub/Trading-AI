@@ -39,6 +39,7 @@ from src.notify.telegram import NullNotifier
 from src.execution.order_manager import OrderManager, PositionStatus, is_dead_entry, realized_pnl
 from src.execution.reconciler import Reconciler
 from src.research.scoreboard import Scoreboard
+from src.risk.exposure import ExposureSnapshot, compute_exposure
 from src.risk.ratchet_stop import build_ratchet
 from src.risk.risk_manager import AccountState, RiskManager
 from src.strategy.regime_filter import RegimeFilter
@@ -387,15 +388,16 @@ class Orchestrator:
             report.skipped.append((symbol, "sentiment block"))
             return
 
-        gross, open_count = self._exposure()
+        exposure = self._exposure()
         last_price = float(feats.iloc[-1].close)
         acct_state = AccountState(
             equity=account.equity,
             start_of_day_equity=account.last_equity,
             buying_power=account.buying_power,
             last_price=last_price,
-            open_positions=open_count,
-            gross_exposure_value=gross,
+            open_positions=exposure.open_count,
+            gross_exposure_value=exposure.gross_value,
+            open_risk_dollars=exposure.open_risk_dollars,
             is_intraday=False,
             day_trade_count=account.daytrade_count,
         )
@@ -491,23 +493,21 @@ class Orchestrator:
                     self.order_manager.close(pos, "kill_switch")
                 except Exception as exc:  # best-effort; resting stops still protect
                     self.audit.record("flatten_error", symbol=symbol, error=str(exc))
-        for order in self.broker.list_open_orders():
+        try:
+            open_orders = retry_transient(self.broker.list_open_orders)
+        except Exception:  # pragma: no cover
+            open_orders = []
+        for order in open_orders:
             try:
-                self.broker.cancel_order(order.id)
+                # cancel is idempotent (cancelling twice is a no-op at the
+                # broker), so retrying it during a kill-switch flatten is safe.
+                retry_transient(lambda oid=order.id: self.broker.cancel_order(oid))
             except Exception:  # pragma: no cover
                 pass
 
-    def _exposure(self):
-        gross = 0.0
-        count = 0
-        for pos in self.positions.values():
-            if pos.status == PositionStatus.CLOSED:
-                continue
-            qty = pos.filled_qty or pos.qty
-            entry = getattr(pos.ratchet, "entry", 0.0)
-            gross += qty * entry
-            count += 1
-        return gross, count
+    def _exposure(self) -> ExposureSnapshot:
+        open_positions = (p for p in self.positions.values() if p.status != PositionStatus.CLOSED)
+        return compute_exposure(open_positions)
 
     def _default_feature_provider(self) -> FeatureProvider:
         from src.data.ingest import live_feature_provider

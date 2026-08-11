@@ -80,3 +80,29 @@ def test_short_blocked_by_bullish_sentiment():
     short = Intent(symbol="AAPL", strategy="breakout", side=Side.SHORT,
                    action=Action.SHORT, confidence=0.6)
     assert gate.apply(short) is None
+
+
+def test_scorer_failure_skips_gate_unchanged():
+    """on_feed_unavailable: skip_gate -- a wired scorer that RAISES (network/API
+    error) must pass the intent through completely unchanged, not apply the
+    neutral haircut and not block. Distinct from `scorer=None` (deliberately no
+    scorer, which IS a real neutral 0 and DOES take the haircut)."""
+    def _boom(symbol):
+        raise TimeoutError("sentiment API timed out")
+
+    gate = SentimentGate(load_config(), scorer=_boom)
+    out = gate.apply(_long_intent(0.7))
+    assert out is not None
+    assert out.confidence == 0.7  # unchanged -- no haircut
+
+
+def test_scorer_failure_does_not_block_a_short_either():
+    def _boom(symbol):
+        raise ConnectionError("no route to sentiment host")
+
+    gate = SentimentGate(load_config(), scorer=_boom)
+    short = Intent(symbol="AAPL", strategy="breakout", side=Side.SHORT,
+                   action=Action.SHORT, confidence=0.6)
+    out = gate.apply(short)
+    assert out is not None
+    assert out.confidence == 0.6

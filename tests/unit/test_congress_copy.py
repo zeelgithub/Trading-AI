@@ -62,7 +62,11 @@ def test_filters_and_mirrors(tmp_path):
     buy = next(a for a in report.actions if a["ticker"] == "NVDA")
     assert buy["action"] == "buy"
     assert buy["decision"] in ("approve", "resize")
-    assert buy["qty"] == 50.0   # 10% max-position cap at $100
+    # stop = $90 (10% below $100), risk/share = 10.
+    # per_strategy_risk_pct 1.33% * confidence 0.6 = 0.798% of 50k = $399
+    # risk budget -> 39 shares (tighter than the 50-share max-position cap
+    # this hit before confidence-scaled sizing was wired into RiskManager).
+    assert buy["qty"] == 39.0
 
     sell = next(a for a in report.actions if a["ticker"] == "AAPL")
     assert sell["action"] == "sell"
