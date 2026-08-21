@@ -48,10 +48,9 @@ class FakeBroker:
         self.reject_entries = reject_entries
         # fill_price: the position's avg_entry_price on a simulated fill. Set
         # this explicitly in any test that asserts on entry price -- without
-        # it, avg_entry_price falls back to stop_price (a real fill price and
-        # a 10%-below-entry stop price are NOT the same number; the fallback
-        # exists only so tests that don't care about entry price still get
-        # some float, not a crash).
+        # it, avg_entry_price defaults to 100.0 (a fixed placeholder, not
+        # derived from any stop/take-profit price passed elsewhere -- entry
+        # and protective-exit submission are two separate broker calls now).
         self.fill_price = fill_price
         self._seq = 0
 
@@ -81,33 +80,57 @@ class FakeBroker:
     def get_order(self, order_id: str) -> OrderView:
         return self._orders[order_id]
 
-    def submit_protected_entry(self, symbol, qty, side: Side, stop_price, take_profit_price, client_order_id):
+    def submit_market_entry(self, symbol, qty, side: Side, client_order_id):
+        """No attached legs -- mirrors the real flow, where the protective
+        stop is submitted separately via submit_stop/submit_oco_exit once
+        the fill is confirmed (see OrderManager.settle)."""
+        filled = self.auto_fill and not self.reject_entries
+        price = self.fill_price if self.fill_price is not None else 100.0
+        entry = OrderView(
+            id=self._next_id(), client_order_id=client_order_id, symbol=symbol, qty=qty,
+            side="buy" if side == Side.LONG else "sell", type="market",
+            status="rejected" if self.reject_entries else ("filled" if filled else "accepted"),
+            filled_qty=qty if filled else 0.0,
+            filled_avg_price=round(price, 2) if filled else None,
+        )
+        self._orders[entry.id] = entry
+        if filled:
+            self.positions.append(PositionView(symbol, qty, side, avg_entry_price=round(price, 2)))
+        return entry
+
+    def submit_stop(self, symbol, qty, side: Side, stop_price, client_order_id):
+        """Standalone GTC stop -- a top-level order, no legs (unlike the old
+        atomic-OTO stop leg this replaces)."""
+        leg_side = "sell" if side == Side.LONG else "buy"
+        stop = OrderView(
+            id=self._next_id(), client_order_id=client_order_id, symbol=symbol,
+            qty=qty, side=leg_side, type="stop", status="held", stop_price=round(stop_price, 2),
+        )
+        self._orders[stop.id] = stop
+        return stop
+
+    def submit_oco_exit(self, symbol, qty, side: Side, stop_price, take_profit_price, client_order_id):
+        """Standalone GTC OCO: a parent order carrying both exit legs, same
+        shape as the old bracket's take-profit branch so _leg_ids extraction
+        works unchanged."""
         leg_side = "sell" if side == Side.LONG else "buy"
         stop_leg = OrderView(
             id=self._next_id(), client_order_id=client_order_id + "-sl", symbol=symbol,
             qty=qty, side=leg_side, type="stop", status="held", stop_price=round(stop_price, 2),
         )
-        legs = [stop_leg]
-        if take_profit_price is not None:
-            legs.append(OrderView(
-                id=self._next_id(), client_order_id=client_order_id + "-tp", symbol=symbol,
-                qty=qty, side=leg_side, type="limit", status="held",
-                limit_price=round(take_profit_price, 2),
-            ))
-        filled = self.auto_fill and not self.reject_entries
-        entry = OrderView(
-            id=self._next_id(), client_order_id=client_order_id, symbol=symbol, qty=qty,
-            side="buy" if side == Side.LONG else "sell", type="market",
-            status="rejected" if self.reject_entries else ("filled" if filled else "accepted"),
-            filled_qty=qty if filled else 0.0, legs=tuple(legs),
+        tp_leg = OrderView(
+            id=self._next_id(), client_order_id=client_order_id + "-tp", symbol=symbol,
+            qty=qty, side=leg_side, type="limit", status="held",
+            limit_price=round(take_profit_price, 2),
         )
-        self._orders[entry.id] = entry
-        for leg in legs:
-            self._orders[leg.id] = leg
-        if filled:
-            price = self.fill_price if self.fill_price is not None else stop_price
-            self.positions.append(PositionView(symbol, qty, side, avg_entry_price=round(price, 2)))
-        return entry
+        parent = OrderView(
+            id=self._next_id(), client_order_id=client_order_id, symbol=symbol, qty=qty,
+            side=leg_side, type="limit", status="held", legs=(stop_leg, tp_leg),
+        )
+        self._orders[parent.id] = parent
+        self._orders[stop_leg.id] = stop_leg
+        self._orders[tp_leg.id] = tp_leg
+        return parent
 
     def replace_stop(self, order_id, stop_price):
         o = self._orders.pop(order_id)

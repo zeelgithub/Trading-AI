@@ -20,7 +20,7 @@ import yaml
 from congress_copy.copy_trader import CopyConfig, CopyTrader, SeenStore
 from congress_copy.providers import JSONFileProvider
 from src.data.providers.alpaca_data import AlpacaData
-from src.execution.broker_alpaca import AlpacaBroker
+from src.execution.broker_alpaca import AlpacaAccountReader
 from src.risk.risk_manager import AccountState, RiskManager
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -58,7 +58,7 @@ def main() -> None:
     provider = JSONFileProvider(ROOT / "congress_copy" / "data" / "disclosures.json")
     trades = provider.fetch()
 
-    broker = AlpacaBroker()
+    broker = AlpacaAccountReader()
     acct = broker.get_account()
     positions = broker.list_positions()
     account = AccountState(

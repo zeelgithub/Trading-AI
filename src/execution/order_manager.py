@@ -1,12 +1,14 @@
 """
 Order manager -- execution layer.
 
-Acts ONLY on intents already approved by the risk gate. Opens a position with a
-single broker call that attaches the protective stop atomically (and a
-take-profit leg when the intent has one) -- so a position is NEVER naked and the
-stop/target are a broker OCO that can't both fill. Raises the resting stop as
-price advances (never lowers it). Settles fills (incl. partial). Closes via the
-broker's position-close (which also cancels the linked legs).
+Acts ONLY on intents already approved by the risk gate. Opens a position by
+submitting the entry ALONE, then attaches the protective stop (a standalone
+GTC order, or a GTC OCO with a take-profit) the moment `settle()` confirms a
+fill -- a position is never marked OPEN until that protection is actually
+resting at the broker. Not an atomic OTO/bracket: see broker_alpaca.py's
+module docstring for why (Alpaca doesn't honor GTC on OTO/bracket child legs).
+Raises the resting stop as price advances (never lowers it). Closes via the
+broker's position-close (which also cancels the linked stop/OCO).
 
 Boundary: submits via the BrokerInterface only.
 """
@@ -43,7 +45,9 @@ class ManagedPosition:
     qty: float                 # ordered quantity
     strategy: str
     entry_order_id: str
-    stop_order_id: str
+    # None until settle() confirms the entry fill and attaches protection --
+    # a position is never marked OPEN while this is still None (see settle()).
+    stop_order_id: str | None
     current_stop: float
     ratchet: object            # PercentRatchet | AtrRatchet (has .update/.stop)
     status: PositionStatus = PositionStatus.PENDING_ENTRY
@@ -51,6 +55,13 @@ class ManagedPosition:
     tp_order_id: str | None = None
     take_profit: float | None = None
     last_order_status: str | None = None  # broker's raw status, for diagnostics
+    # The tag open_position() was called with -- reused (not regenerated) for
+    # the protective-order client_order_id so a retried/re-attempted attach
+    # (even across a halt spanning a day boundary) stays the SAME deterministic
+    # id and the broker's own idempotency guard applies, instead of risking a
+    # second real stop order landing on top of a first one that actually went
+    # through. Defaults to "" for positions persisted before this field existed.
+    open_tag: str = ""
 
 
 def is_dead_entry(position: "ManagedPosition") -> bool:
@@ -78,8 +89,10 @@ class OrderManager:
     def open_position(self, decision: RiskDecision, ratchet, tag: str) -> ManagedPosition:
         """Open a position from an APPROVED/RESIZED decision plus its ratchet.
 
-        Places one protected entry (entry + stop leg, + take-profit leg if the
-        intent carries one). `tag` is a per-trade idempotency token.
+        Submits ONLY the entry -- no protective stop yet, deliberately (see
+        module docstring). `settle()` attaches it the moment the fill is
+        confirmed. `tag` is this position's idempotency token, reused by
+        every later order (protection, retries) tied to it.
         """
         if decision.decision not in (Decision.APPROVE, Decision.RESIZE):
             raise ValueError(f"cannot open position on a {decision.decision.value} decision")
@@ -100,33 +113,34 @@ class OrderManager:
         # it would still surface as an error here -- default-to-halt (rule 3)
         # and a human/reconciler confirming what actually happened at the
         # broker is safer than guessing.
-        parent = self.broker.submit_protected_entry(
-            symbol, qty, side, stop_level, intent.take_profit,
-            _coid(symbol, intent.strategy, tag, "entry"),
+        entry = self.broker.submit_market_entry(
+            symbol, qty, side, _coid(symbol, intent.strategy, tag, "entry"),
         )
-
-        stop_id, tp_id = self._leg_ids(parent)
-        if stop_id is None:
-            # No naked positions: if the protective stop did not attach, refuse.
-            raise RuntimeError(f"protected entry for {symbol} returned no stop leg")
 
         return ManagedPosition(
             symbol=symbol,
             side=side,
             qty=qty,
             strategy=intent.strategy,
-            entry_order_id=parent.id,
-            stop_order_id=stop_id,
+            entry_order_id=entry.id,
+            stop_order_id=None,
             current_stop=stop_level,
             ratchet=ratchet,
             status=PositionStatus.PENDING_ENTRY,
             filled_qty=0.0,
-            tp_order_id=tp_id,
+            tp_order_id=None,
             take_profit=intent.take_profit,
+            open_tag=tag,
         )
 
     def settle(self, position: ManagedPosition) -> PositionStatus:
         """Refresh fill state from the broker. Acts on filled_qty, not ordered.
+
+        The FIRST time a fill is observed, attaches the protective stop (or
+        GTC OCO) before the position is ever marked OPEN -- `_attach_protection`
+        raising here (no naked positions, rule 4) leaves `status` at
+        PENDING_ENTRY and propagates, halting the cycle (rule 3) rather than
+        continuing with a filled, unprotected position.
 
         A dead order (rejected/canceled/expired/...) with zero fill settles to
         CLOSED rather than sitting in PENDING_ENTRY -- `is_dead_entry()` lets
@@ -138,14 +152,54 @@ class OrderManager:
         position.filled_qty = order.filled_qty
         position.last_order_status = order.status
         if order.filled_qty and order.filled_qty > 0:
+            if position.stop_order_id is None:
+                self._attach_protection(position)
             position.status = PositionStatus.OPEN
         elif order.status in DEAD_ORDER_STATUSES:
             position.status = PositionStatus.CLOSED
         return position.status
 
+    def _attach_protection(self, position: ManagedPosition) -> None:
+        """Submit the standalone protective stop (or GTC OCO with a
+        take-profit) now that the entry is confirmed filled. `retry_transient`
+        is safe here -- unlike the entry submission above -- because the
+        client_order_id is deterministic from `position.open_tag`: a retried
+        duplicate is rejected by the broker, not double-submitted, even if
+        this gets re-attempted in a later cycle after a halt."""
+        tag = position.open_tag
+        take_profit = position.take_profit
+        if take_profit is not None:
+            parent = retry_transient(lambda: self.broker.submit_oco_exit(
+                position.symbol, position.filled_qty, position.side,
+                position.current_stop, take_profit,
+                _coid(position.symbol, position.strategy, tag, "protect"),
+            ))
+            stop_id, tp_id = self._leg_ids(parent)
+        else:
+            stop_order = retry_transient(lambda: self.broker.submit_stop(
+                position.symbol, position.filled_qty, position.side,
+                position.current_stop,
+                _coid(position.symbol, position.strategy, tag, "protect"),
+            ))
+            stop_id, tp_id = stop_order.id, None
+
+        if stop_id is None:
+            # No naked positions (rule 4): a filled entry with no confirmed
+            # stop must never be considered protected. Propagating halts the
+            # cycle (rule 3) instead of silently marking this position OPEN.
+            raise RuntimeError(f"protective exit for {position.symbol} returned no stop leg")
+        position.stop_order_id = stop_id
+        position.tp_order_id = tp_id
+
     def raise_stop(self, position: ManagedPosition, price: float, atr: float | None = None) -> bool:
         """If the ratchet advances the stop, replace the resting stop leg. Only
         ever moves to a MORE protective level. Returns True if moved."""
+        if position.stop_order_id is None:
+            # Invariant: settle() never marks a position OPEN without first
+            # attaching protection, so this should be unreachable -- fail
+            # loudly here rather than pass None to the broker and get a
+            # confusing error two layers down.
+            raise RuntimeError(f"{position.symbol} has no stop_order_id -- not yet protected")
         new_stop = position.ratchet.update(price, atr)
         more_protective = (
             new_stop > position.current_stop

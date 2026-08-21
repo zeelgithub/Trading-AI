@@ -106,6 +106,11 @@ class Orchestrator:
 
         # Never trade on stale data (rule 3): bars older than this are unusable.
         self.max_bar_age_days = int(self.config.get("settings.data.max_bar_age_days", 4))
+        # Stops are stop-market, not stop-limit (see docs/SAFEGUARDS.md "Stop
+        # order type (gap-down risk)") -- a gap can still fill worse than
+        # intended, so auto-close alerts distinctly when it does.
+        self.gap_slippage_alert_pct = float(
+            self.config.get("settings.alerts.gap_slippage_alert_pct", 2.0))
         # How long to wait for the cross-process state lock (vs a concurrent
         # phone action) before skipping this cycle quietly.
         self.cycle_lock_timeout = float(
@@ -177,12 +182,22 @@ class Orchestrator:
                 # they don't trigger a halt-level mismatch on the next check.
                 for sym in rec.auto_closed:
                     if sym in self.positions:
-                        if self.execute:  # stop fired / external close -> stop level is the exit proxy
-                            self._record_attribution(self.positions[sym], self.positions[sym].current_stop)
-                        self.positions[sym].status = PositionStatus.CLOSED
+                        pos = self.positions[sym]
+                        exit_price, slippage_pct = self._resolve_auto_close_exit(pos)
+                        if self.execute:
+                            self._record_attribution(pos, exit_price)
+                        pos.status = PositionStatus.CLOSED
                         self.audit.record("auto_closed", symbol=sym,
-                                          detail="position gone from broker (stop fired or external close)")
-                        self._notify("fill", f"{sym} closed at broker (stop fired or external close)")
+                                          detail="position gone from broker (stop fired or external close)",
+                                          exit_price=exit_price, slippage_pct=slippage_pct)
+                        if slippage_pct is not None and slippage_pct >= self.gap_slippage_alert_pct:
+                            self._notify(
+                                "incident",
+                                f"{sym} stop filled with {slippage_pct:.1f}% gap slippage "
+                                f"(intended ${pos.current_stop:,.2f}, filled ${exit_price:,.2f})",
+                            )
+                        else:
+                            self._notify("fill", f"{sym} closed at broker (stop fired or external close)")
                         self.log.info("auto-closed %s: gone from broker", sym)
                 if not rec.ok:
                     self.audit.record("reconcile_mismatch", detail=rec.summary())
@@ -461,11 +476,34 @@ class Orchestrator:
         except Exception as exc:  # pragma: no cover - defensive
             self.log.warning("notify failed (%s): %s", event, exc)
 
+    def _resolve_auto_close_exit(self, pos) -> tuple[float, float | None]:
+        """Best-effort: fetch the stop leg's REAL fill price so attribution and
+        gap-slippage detection use what actually happened, not the intended
+        stop level. Falls back to the stop level (and no slippage reading) if
+        the order lookup fails or the broker never reports a fill price --
+        e.g. a manual close cancels the stop leg instead of filling it.
+
+        Returns (exit_price, slippage_pct): slippage_pct is signed, positive
+        meaning worse than intended (below the stop for a long, above it for
+        a short), None when there's nothing real to compare against.
+        """
+        fill = None
+        try:
+            fill = self.broker.get_order(pos.stop_order_id).filled_avg_price
+        except Exception as exc:  # pragma: no cover - defensive, never blocks a cycle
+            self.log.warning("could not fetch stop fill price for %s: %s", pos.symbol, exc)
+        if fill is None or not pos.current_stop:
+            return pos.current_stop, None
+        adverse = (pos.current_stop - fill) if pos.side == Side.LONG else (fill - pos.current_stop)
+        return fill, round(adverse / pos.current_stop * 100.0, 2)
+
     def _record_attribution(self, pos, exit_price: float) -> None:
         """Record a real close's realized PnL against its strategy on the
         scoreboard. Best-effort: attribution must NEVER affect a trading cycle.
-        `exit_price` is a proxy (latest close / stop level), good enough for
-        relative strategy ranking, not broker-exact accounting."""
+        `exit_price` is the stop leg's real fill price when the broker reports
+        one (see `_resolve_auto_close_exit`); a signal exit still passes the
+        latest close, and a stale/unreported fill falls back to the stop
+        level -- good enough for relative strategy ranking even then."""
         try:
             entry = float(getattr(pos.ratchet, "entry", 0.0))
             qty = pos.filled_qty or pos.qty

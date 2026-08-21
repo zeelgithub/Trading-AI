@@ -47,6 +47,26 @@ def test_pending_entry_vanished_is_flagged():
     assert "AAPL" in report.pending_lost
 
 
+def test_pending_entry_actually_filled_at_broker_without_stop_is_unprotected():
+    """Regression: a real incident left 7 of 8 positions genuinely filled and
+    naked at the broker, but locally still marked PENDING_ENTRY (a crash
+    between fill and settle() never updated it) -- the OLD reconciler only
+    checked broker-position EXISTENCE for a pending entry, so these sailed
+    through reconcile clean for weeks. A broker position that already exists
+    is exposed to real risk regardless of what local status says."""
+    broker = FakeBroker(positions=[PositionView("AAPL", 50, Side.LONG, 100.0)], auto_fill=False)
+    report = Reconciler(broker).reconcile({"AAPL": pos("AAPL", PositionStatus.PENDING_ENTRY)})
+    assert not report.ok
+    assert report.unprotected_positions == ["AAPL"]
+
+
+def test_pending_entry_actually_filled_at_broker_with_stop_is_ok():
+    broker = FakeBroker(positions=[PositionView("AAPL", 50, Side.LONG, 100.0)], auto_fill=False)
+    broker.seed_order(stop_order("AAPL"))
+    report = Reconciler(broker).reconcile({"AAPL": pos("AAPL", PositionStatus.PENDING_ENTRY)})
+    assert report.ok
+
+
 def test_open_without_stop_is_unprotected():
     broker = FakeBroker(positions=[PositionView("AAPL", 50, Side.LONG, 100.0)], auto_fill=False)
     report = Reconciler(broker).reconcile({"AAPL": pos("AAPL", PositionStatus.OPEN)})

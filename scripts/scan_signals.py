@@ -20,7 +20,7 @@ from src.common.config import load_config
 from src.data import store
 from src.data.features import build_features
 from src.data.ingest import ingest_symbol
-from src.execution.broker_alpaca import AlpacaBroker
+from src.execution.broker_alpaca import AlpacaAccountReader
 from src.risk.risk_manager import AccountState, RiskManager
 from src.strategy.regime_filter import RegimeFilter
 from src.strategy.registry import build_strategies
@@ -37,8 +37,9 @@ def main() -> None:
     strategies = build_strategies(config)
     risk = RiskManager(config)
 
-    # Read-only account snapshot (NEVER places orders).
-    broker = AlpacaBroker()
+    # Read-only account snapshot (AlpacaAccountReader has no order-placing
+    # methods, so this can never place an order even by future accident).
+    broker = AlpacaAccountReader()
     acct = broker.get_account()
     positions = broker.list_positions()
     gross = sum(p.qty * p.avg_entry_price for p in positions)

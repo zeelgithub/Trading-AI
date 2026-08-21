@@ -5,8 +5,15 @@ Broker is the source of truth. Compares the bot's internal managed positions
 against what Alpaca reports, and is PENDING-AWARE so a just-submitted (not yet
 filled) entry does not trigger a false halt:
 
-  - PENDING_ENTRY  -> expect an open entry order OR a broker position; if neither
-    exists the order vanished -> mismatch.
+  - PENDING_ENTRY, no broker position yet -> expect a working entry order; if
+    neither exists the order vanished -> mismatch.
+  - PENDING_ENTRY, but a broker position ALREADY exists -> it's actually
+    filled, whatever the bot's own bookkeeping says (a crash between fill and
+    settle() can leave this stale indefinitely) -> held to the SAME
+    protection standard as OPEN below, not skipped. This is exactly the gap
+    that let real, filled, unprotected positions go undetected for weeks: the
+    reconciler only checked broker-position EXISTENCE for a pending entry,
+    never whether it was protected once it turned out to be real.
   - OPEN / PENDING_EXIT -> expect a broker position with matching qty AND a
     resting protective stop; otherwise mismatch / UNPROTECTED.
   - A broker position the bot does not track at all -> unknown -> halt.
@@ -75,9 +82,13 @@ class Reconciler:
             tracked.add(symbol)
 
             if pos.status == PositionStatus.PENDING_ENTRY:
-                # Fine as long as the entry order is still working or it filled.
                 if symbol not in order_symbols and symbol not in broker_positions:
                     report.pending_lost.append(symbol)
+                elif symbol in broker_positions and symbol not in stop_symbols:
+                    # Already a real, filled broker position -- exposed to the
+                    # same risk as an OPEN one, so it doesn't get a pass just
+                    # because local bookkeeping hasn't caught up yet.
+                    report.unprotected_positions.append(symbol)
                 continue
 
             # OPEN / PENDING_EXIT -> must be a real, protected broker position.

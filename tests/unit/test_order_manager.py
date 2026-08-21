@@ -25,25 +25,76 @@ def make_ratchet() -> PercentRatchet:
     )
 
 
-def test_protected_entry_no_tp_is_oto():
+def test_open_position_submits_entry_alone_no_stop_yet():
+    """The entry is submitted without any attached legs -- the protective
+    stop isn't placed until settle() confirms a fill (see module docstring:
+    Alpaca doesn't honor GTC on OTO/bracket child legs, so it can't be
+    attached atomically anymore)."""
     broker = FakeBroker(auto_fill=False)
     pos = OrderManager(broker).open_position(make_decision(), make_ratchet(), tag="t1")
     assert pos.status == PositionStatus.PENDING_ENTRY
+    assert pos.stop_order_id is None
+    assert pos.tp_order_id is None
+    assert pos.current_stop == pytest.approx(90.0)
+    assert all(o.type != "stop" for o in broker._orders.values())
+
+
+def test_settle_attaches_standalone_stop_no_tp():
+    broker = FakeBroker(auto_fill=True)
+    pos = OrderManager(broker).open_position(make_decision(), make_ratchet(), tag="t1")
+    assert OrderManager(broker).settle(pos) == PositionStatus.OPEN
     assert pos.stop_order_id is not None
     assert pos.tp_order_id is None              # no take-profit leg
-    assert pos.current_stop == pytest.approx(90.0)
     stops = [o for o in broker._orders.values() if o.type == "stop"]
     assert len(stops) == 1 and stops[0].stop_price == pytest.approx(90.0)
 
 
-def test_protected_entry_with_tp_is_bracket():
-    broker = FakeBroker(auto_fill=False)
-    pos = OrderManager(broker).open_position(
+def test_settle_attaches_gtc_oco_when_take_profit_present():
+    broker = FakeBroker(auto_fill=True)
+    om = OrderManager(broker)
+    pos = om.open_position(
         make_decision(take_profit=102.0, strategy="mean_reversion"), make_ratchet(), tag="t1"
     )
+    assert om.settle(pos) == PositionStatus.OPEN
     assert pos.tp_order_id is not None
-    tps = [o for o in broker._orders.values() if o.type == "limit"]
-    assert len(tps) == 1 and tps[0].limit_price == pytest.approx(102.0)
+    tp_leg = broker._orders[pos.tp_order_id]
+    assert tp_leg.type == "limit" and tp_leg.limit_price == pytest.approx(102.0)
+
+
+def test_settle_propagates_failure_to_attach_protection_instead_of_marking_open():
+    """No naked positions (rule 4): if the standalone stop can't be placed
+    after a confirmed fill, settle() must NOT mark the position OPEN -- the
+    exception has to propagate so the cycle halts (rule 3), not get
+    swallowed into a silently-unprotected 'open' position."""
+    broker = FakeBroker(auto_fill=True)
+    om = OrderManager(broker)
+    pos = om.open_position(make_decision(), make_ratchet(), tag="t1")
+
+    def _boom(*a, **kw):
+        raise RuntimeError("broker unreachable")
+    broker.submit_stop = _boom
+
+    with pytest.raises(RuntimeError, match="broker unreachable"):
+        om.settle(pos)
+    assert pos.status == PositionStatus.PENDING_ENTRY
+    assert pos.stop_order_id is None
+
+
+def test_settle_reuses_open_tag_for_protection_idempotency():
+    """Re-attempting settle() after protection already attached must not
+    submit a second stop -- and if it somehow did retry (stop_order_id still
+    None), it would reuse the SAME client_order_id every time because it's
+    derived from the position's own open_tag, not from "today", so a retry
+    spanning a halt is idempotent at the broker rather than risking a second
+    real stop order stacked on the first."""
+    broker = FakeBroker(auto_fill=True)
+    om = OrderManager(broker)
+    pos = om.open_position(make_decision(), make_ratchet(), tag="2026-06-15")
+    om.settle(pos)
+    first_stop_id = pos.stop_order_id
+    om.settle(pos)  # re-settle an already-open, already-protected position
+    assert pos.stop_order_id == first_stop_id
+    assert len([o for o in broker._orders.values() if o.type == "stop"]) == 1
 
 
 def test_settle_full_fill():
@@ -67,6 +118,7 @@ def test_raise_stop_replaces_leg():
     broker = FakeBroker()
     om = OrderManager(broker)
     pos = om.open_position(make_decision(), make_ratchet(), tag="t1")
+    om.settle(pos)                              # confirm the fill -> attaches the stop
     assert om.raise_stop(pos, 120.0) is True
     assert pos.current_stop == pytest.approx(110.0)
     assert broker.replaced and broker.replaced[-1][1] == pytest.approx(110.0)
@@ -77,6 +129,7 @@ def test_close_liquidates_and_cancels_legs():
     broker = FakeBroker()
     om = OrderManager(broker)
     pos = om.open_position(make_decision(), make_ratchet(), tag="t1")
+    om.settle(pos)                              # confirm the fill -> attaches the stop
     om.close(pos, "signal")
     assert pos.status == PositionStatus.CLOSED
     assert broker.closed == ["AAPL"]

@@ -16,8 +16,12 @@ so the decision path reaches the order API only through the risk gate.
    --reset`. State files are written atomically; corrupt ones are quarantined.
    New entries are refused while the market is closed — everywhere, including
    phone approvals (no overnight-queued market orders).
-4. No naked positions: every entry attaches a protective stop atomically
-   (`submit_protected_entry`; bracket adds a take-profit OCO). Act on `filled_qty`.
+4. No naked positions: the entry alone is submitted first (`submit_market_entry`);
+   `OrderManager.settle` attaches the protective stop the instant a fill is
+   confirmed (`submit_stop`, or `submit_oco_exit` for a take-profit OCO) and a
+   position is never marked OPEN until that succeeds -- NOT an atomic OTO/bracket
+   (Alpaca doesn't honor GTC on OTO/bracket child legs; see docs/SAFEGUARDS.md
+   "How a protected entry actually works"). Act on `filled_qty`.
 5. Indicators/features must be causal -- row i uses only bars <= i (no look-ahead).
 6. Live trading is a deliberate flag (`mode: live`); never flip it as a side
    effect. New entries/exits happen only when the market is open.

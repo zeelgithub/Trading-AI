@@ -96,7 +96,16 @@ class Backtester:
         self.risk = RiskManager(self.config)
         self.max_open = int(self.config.risk_limits.get("account", {}).get("max_open_positions", 10))
 
-    def run(self, features_by_symbol: dict[str, pd.DataFrame]) -> BacktestResult:
+    def run(
+        self, features_by_symbol: dict[str, pd.DataFrame], entries_start: object = None,
+    ) -> BacktestResult:
+        """Run the full event loop. `entries_start`, if given, suppresses NEW
+        entries before that date while indicators/exits still see the complete
+        history -- i.e. the fold still gets a real EMA200 warmup instead of a
+        truncated one. This is what a walk-forward fold uses to keep a
+        sub-window's trades isolated without re-deriving indicators per fold
+        (see src/research/walkforward.py).
+        """
         # Unified, sorted date index across all symbols.
         all_dates = sorted(set().union(*[df.index for df in features_by_symbol.values()]))
 
@@ -125,7 +134,17 @@ class Backtester:
                 pos = positions[symbol]
                 strat = self.strategies.get(pos.strategy)
                 exit_sig = bool(strat.should_exit(symbol, df.loc[:today], pos.side)) if strat else False
-                trade = self._manage(pos, bar, today, exit_sig)
+                # today's the last bar we have for this symbol -- either the
+                # window ended or (delisting/acquisition) the symbol stopped
+                # trading. Without this, a position open at that point would
+                # just vanish: no exit ever fires again since `today not in
+                # df.index` skips it on every later date, so it never becomes
+                # a Trade and never counts toward win%/PF/significance --
+                # silently the MOST optimistic possible outcome for exactly
+                # the positions a survivorship-bias-free universe exists to
+                # capture. Force-close at the last available price instead.
+                is_last_bar = today == df.index[-1]
+                trade = self._manage(pos, bar, today, exit_sig, is_last_bar)
                 if trade is not None:
                     realized += trade.pnl
                     trades.append(trade)
@@ -133,6 +152,9 @@ class Backtester:
 
             # 3. Generate new entries (signal at today's close -> fill next open).
             equity = self.initial_equity + realized + self._unrealized(positions, features_by_symbol, today)
+            if entries_start is not None and today < entries_start:
+                equity_points.append((today, equity))
+                continue
             for symbol, df in features_by_symbol.items():
                 if symbol in positions or symbol in pending:
                     continue
@@ -198,7 +220,9 @@ class Backtester:
             take_profit = fill * (1 + tp) if side == Side.LONG else fill * (1 - tp)
         return _Position(symbol, side, order["qty"], fill, today, ratchet, take_profit, order["strategy"])
 
-    def _manage(self, pos: _Position, bar, today, exit_sig: bool = False) -> Trade | None:
+    def _manage(
+        self, pos: _Position, bar, today, exit_sig: bool = False, is_last_bar: bool = False
+    ) -> Trade | None:
         high, low, close = float(bar.high), float(bar.low), float(bar.close)
         stop = pos.ratchet.stop
 
@@ -209,6 +233,8 @@ class Backtester:
                 return self._close(pos, pos.take_profit, today, "target")
             if exit_sig:
                 return self._close(pos, close, today, "signal_exit")
+            if is_last_bar:
+                return self._close(pos, close, today, "data_end")
             pos.ratchet.update(close)
         else:
             if high >= stop:
@@ -217,6 +243,8 @@ class Backtester:
                 return self._close(pos, pos.take_profit, today, "target")
             if exit_sig:
                 return self._close(pos, close, today, "signal_exit")
+            if is_last_bar:
+                return self._close(pos, close, today, "data_end")
             pos.ratchet.update(close)
         return None
 

@@ -121,6 +121,7 @@ class StateStore:
             "tp_order_id": p.tp_order_id,
             "take_profit": p.take_profit,
             "last_order_status": p.last_order_status,
+            "open_tag": p.open_tag,
             "ratchet": p.ratchet.state(),
         }
 
@@ -140,4 +141,10 @@ class StateStore:
             tp_order_id=d.get("tp_order_id"),
             take_profit=d.get("take_profit"),
             last_order_status=d.get("last_order_status"),
+            # Positions persisted before this field existed (real accounts
+            # included -- see docs/ROADMAP.md "naked position" fix) load with
+            # "": protection is already attached for those, so open_tag is
+            # only ever consulted by _attach_protection, which never runs
+            # again for an already-protected position.
+            open_tag=d.get("open_tag", ""),
         )

@@ -26,6 +26,7 @@ from src.data import store
 from src.data.features import build_features
 from src.research.evaluation import evaluate_strategies
 from src.research.scoreboard import Scoreboard
+from src.research.walkforward import evaluate_walk_forward
 
 log = get_logger("evaluate")
 
@@ -81,6 +82,12 @@ def main() -> None:
     parser.add_argument("--min-trades", type=int, default=30, help="trades required for 'validated'")
     parser.add_argument("--no-benchmark", action="store_true", help="skip SPY benchmark comparison")
     parser.add_argument("--no-save", action="store_true", help="don't write the scoreboard")
+    parser.add_argument("--folds", type=int, default=3,
+                        help="walk-forward folds (default 3); the last fold is the "
+                             "closest thing this project has to a real out-of-sample holdout")
+    parser.add_argument("--no-walk-forward", action="store_true",
+                        help="skip the walk-forward pass (it reuses the same features, "
+                             "but re-runs the backtest once per fold, so it's slower)")
     args = parser.parse_args()
 
     symbols = list(args.symbols or default_symbols)
@@ -111,6 +118,13 @@ def main() -> None:
 
     print()
     print(report.text())
+
+    if not args.no_walk_forward:
+        wf_report = evaluate_walk_forward(
+            features, config=config, n_folds=args.folds, n_bootstrap=args.bootstrap,
+        )
+        print()
+        print(wf_report.text())
 
     if not args.no_save:
         sb = Scoreboard()

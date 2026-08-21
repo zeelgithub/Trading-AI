@@ -276,9 +276,8 @@ def test_place_manual_surfaces_broker_rejection(tmp_path):
 
 def test_fake_broker_fill_price_is_settable_and_distinct_from_stop():
     broker = FakeBroker(fill_price=150.0)
-    order = broker.submit_protected_entry(
-        "AAPL", 10, Side.LONG,
-        stop_price=135.0, take_profit_price=None, client_order_id="c1")
+    broker.submit_market_entry("AAPL", 10, Side.LONG, client_order_id="c1")
+    stop = broker.submit_stop("AAPL", 10, Side.LONG, stop_price=135.0, client_order_id="c1-sl")
     pos = broker.list_positions()[0]
     assert pos.avg_entry_price == pytest.approx(150.0)
-    assert pos.avg_entry_price != pytest.approx(order.legs[0].stop_price)
+    assert pos.avg_entry_price != pytest.approx(stop.stop_price)

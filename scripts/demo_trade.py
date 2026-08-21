@@ -19,7 +19,7 @@ import sys
 from src.common.config import load_config
 from src.common.models import Action, Intent, Side
 from src.data.providers.alpaca_data import AlpacaData
-from src.execution.broker_alpaca import AlpacaBroker, exit_side
+from src.execution.broker_alpaca import AlpacaAccountReader, exit_side
 from src.execution.order_manager import _coid
 from src.risk.ratchet_stop import build_ratchet
 from src.risk.risk_manager import AccountState, RiskManager
@@ -32,7 +32,7 @@ def main() -> None:
 
     config = load_config()
     price = float(AlpacaData().get_daily_bars(symbol, lookback_days=10).iloc[-1].close)
-    acct = AlpacaBroker().get_account()  # read-only
+    acct = AlpacaAccountReader().get_account()  # read-only
 
     rp = config.risk_limits["ratchet_stop"][strategy]
     stop = round(price * (1 - rp["initial_stop_pct"] / 100.0), 2)

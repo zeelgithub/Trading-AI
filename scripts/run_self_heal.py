@@ -48,9 +48,9 @@ def _data_is_fresh(symbols, max_age_days: int) -> bool:
 def _broker_reachable() -> bool:
     """True if a broker account read succeeds (i.e. we are reconnected)."""
     try:
-        from src.execution.broker_alpaca import AlpacaBroker
+        from src.execution.broker_alpaca import AlpacaAccountReader
 
-        AlpacaBroker().get_account()
+        AlpacaAccountReader().get_account()
         return True
     except Exception as exc:  # still down
         log.info("broker still unreachable: %s", exc)

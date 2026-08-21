@@ -25,16 +25,19 @@ De-risked order of construction. Each step is testable before the next.
 - [x] Step 4: regime filter + 3 strategies + sentiment gate (paper-shadow) — 59 tests pass; scan_signals runs full chain on live data, keys rotated
 - [x] Step 5: orchestrator (state machine, reconcile, kill switch, ratchet raise, exec guards, state persistence) — 69 tests pass; ran live in SHADOW, no orders
 - [x] Step 6: backtester + metrics (event-driven, next-open fills, reuses live components) — 73 tests pass
-- [x] Step 6b: VALIDATION — re-run 2026-08-10 with 27 symbols + SPY over ~4.1 years
-  (`--full-refetch --lookback-days 1500`, up from the original 8-trade/14-month run).
-  Final numbers (post Step 6c + 6d below): trend_following VALIDATED (42 trades,
-  PF 3.51, Sidak-adjusted p=0.045); breakout INCONCLUSIVE (179 trades, PF 1.71,
-  p=0.055 — just past the bar); mean_reversion NOISE and net-negative (47 trades,
-  PF 0.57). Portfolio: +38.4% return, Sharpe 1.34, maxDD -5.4% vs. buy-and-hold
-  SPY's +113.5%/1.24 — underperforms on raw return, beats SPY's Sharpe with a much
+- [x] Step 6b: VALIDATION — re-run 2026-08-10 over ~4.1 years (`--full-refetch
+  --lookback-days 1500`, up from the original 8-trade/14-month run). Latest numbers
+  (post Step 6c/6d risk-layer changes below, plus a survivorship-bias fix to the
+  universe and a backtester force-close bug fix — see docs/STRATEGIES.md
+  "Survivorship-bias fix"): trend_following VALIDATED (43 trades, PF 3.64,
+  Sidak-adjusted p=0.037); breakout INCONCLUSIVE (186 trades, PF 1.70, p=0.054 —
+  just past the bar); mean_reversion NOISE and net-negative (48 trades, PF 0.56).
+  Portfolio: +38.5% return, Sharpe 1.30, maxDD -5.4% vs. buy-and-hold SPY's
+  +113.5%/1.24 — underperforms on raw return, beats SPY's Sharpe with a much
   smaller drawdown. Full detail in docs/STRATEGIES.md "Validation status".
   Do not --execute yet: one strategy clearing the bar is a floor, not a green light —
-  see Step 7.
+  see Step 7. Still missing at this point: walk-forward / out-of-sample testing
+  (see Step 6e) and any live/paper track record at all (still true, see Step 7).
 - [x] Step 6c: confidence-scaled position sizing (`src/risk/risk_manager.py`
   `evaluate()` step 7) — `intent.confidence` (strategy conviction + sentiment-gate
   haircut) now scales the risk budget instead of being computed and ignored; clamped
@@ -49,11 +52,72 @@ De-risked order of construction. Each step is testable before the next.
   once/cycle against realized+unrealized loss and only blocked new entries;
   nothing capped simultaneous stop-outs across up to `max_open_positions` (10).
   See docs/SAFEGUARDS.md and docs/STRATEGIES.md "Recent risk-layer changes".
+- [x] Step 6e: walk-forward / out-of-sample validation (`src/research/walkforward.py`
+  `evaluate_walk_forward`, `Backtester.run(..., entries_start=...)`; wired into
+  `scripts/evaluate_strategies.py` by default, `--folds N` / `--no-walk-forward`) —
+  splits the window into N sequential folds, each an independent backtest (fresh
+  equity, no carried-over positions, no entries before the fold's own start) that
+  still sees full history for indicator warmup. Closes the specific gap Step 6b
+  flagged: the in-sample verdict was partly scored on the same window used to
+  hand-tune the regime/entry thresholds. Result (3 folds, same run as above):
+  trend_following and breakout hold PF > 1 in every fold including the true
+  holdout (fold 3, entirely outside the threshold-tuning window); mean_reversion
+  is PF < 1 in every fold and worsening (0.63 -> 0.83 -> 0.21) — sharper evidence
+  for the disable decision below than the pooled backtest alone gave. Full table
+  in docs/STRATEGIES.md "Walk-forward validation". Does NOT re-fit parameters per
+  fold (these strategies fit nothing); does not replace a live/paper track record.
+- [x] Fixed a live-blocking bug found 2026-08-11 while preparing for Step 7: a
+  real autonomous cycle had HALTED (class `exception`) on `int() argument ...
+  not 'NoneType'`. Root cause: alpaca-py types `TradeAccount.daytrade_count` as
+  `Optional[int]`, but `AlpacaBroker.get_account()` (`src/execution/broker_alpaca.py`)
+  force-cast it with a bare `int(...)`, no None-guard — crashing the FIRST broker
+  call of every cycle whenever Alpaca omits the field (a real, SDK-documented
+  possibility, e.g. before it's been computed for an account). `AccountState.day_trade_count`
+  downstream (`risk_manager.py`) already treated `None` as "skip broker
+  reconciliation, trust the local PDT tracker" — the crash was pure missing
+  null-handling, not a real safety question. `AccountView.daytrade_count` is now
+  `int | None`, matching every downstream consumer, which already expected
+  Optional. Also closed a real coverage gap this exposed: `AlpacaBroker` --
+  the only module permitted to place orders -- had zero direct tests of its
+  alpaca-py response mapping (everything else went through `FakeBroker`, which
+  never runs the real translation code); new `tests/unit/test_broker_alpaca.py`
+  covers it, mocking the SDK client the same way `test_alpaca_data.py` does.
+- [x] Fixed a SECOND, more serious live-blocking bug found the same day, clearing
+  the halt above: reconciliation flagged a real position UNPROTECTED. Investigation
+  found ALL 8 real open positions had their "atomically attached" protective stop
+  expire at the same day's close and sit completely naked for weeks -- Alpaca does
+  not honor a requested GTC time-in-force on OTO/bracket child legs (confirmed
+  against this account's real order history + Alpaca's own community forum).
+  Root-cause fix, not a workaround: entries are no longer submitted as an atomic
+  OTO/bracket. `OrderManager.open_position` now submits the entry alone
+  (`AlpacaBroker.submit_market_entry`); `OrderManager.settle`, the instant it
+  confirms the fill, attaches the stop as its own standalone GTC order
+  (`submit_stop`, or `submit_oco_exit` for a GTC OCO when there's a take-profit)
+  -- neither is nested under the entry, so neither is subject to the OTO/bracket
+  TIF limitation. A position is never marked OPEN until that succeeds; if it
+  fails, the exception propagates and HALTS the cycle (rule 3) rather than
+  continuing with a filled, unprotected position. Retries are idempotency-safe
+  across a halt spanning any amount of time: the protective order's
+  client_order_id is derived from the position's own `open_tag`, fixed at
+  `open_position` and never regenerated from "today". Full writeup:
+  docs/SAFEGUARDS.md "How a protected entry actually works". New tests:
+  `tests/unit/test_broker_alpaca.py` (asserts the exact TIF/order_class/side
+  requested against a mocked SDK client -- this class of bug is invisible to
+  `FakeBroker`, which just echoes back whatever's asked for) and
+  `tests/unit/test_order_manager.py` (settle-triggers-protection, retry
+  idempotency, propagate-not-swallow on failure). The 8 real positions
+  themselves still need a one-time remediation pass using this same new
+  mechanism -- not yet run, pending go-ahead.
 - [ ] Step 7: paper EXECUTE smoke (--execute) ONLY after validation passes; then small real capital.
-  Candidate next moves before that: disable mean_reversion via `/review` (human-approved
-  rotation, not automatic) since it is now net-negative rather than just under-sampled;
-  let trend_following accumulate more live/backtest history before deciding; still no
-  strategy has a live paper-trading track record backing the backtest verdict.
+  Candidate next moves before that: let trend_following accumulate more live/backtest
+  history before deciding; still no strategy has a live paper-trading track record
+  backing the backtest verdict.
+- [x] `mean_reversion` disabled via `state/rotation.json` (`RotationState.apply("disable",
+  "mean_reversion")`) — it was net-negative (PF 0.57) rather than just under-sampled, per
+  Step 6b. Note: the per-strategy `enabled:` flag in `config/strategies.yaml` is NOT the
+  live gate (`build_strategies` never reads it) — the orchestrator checks
+  `state/rotation.json` each cycle instead, so this must be applied there (or via
+  `/rotate disable mean_reversion` from the phone), not by editing the yaml.
 
 ## Agentic orchestrator rebuild (in progress)
 
@@ -163,7 +227,14 @@ weights, congress filters, universe extras).
   despite being documented in `config/strategies.yaml`; a sentiment-feed outage on
   a multi-signal day could have tripped the consecutive-error breaker and halted
   with EXCEPTION (manual reset only) over an infra hiccup, not a logic error.
-- Read-only account path (remove trading-cred construction in scan_signals / congress_copy).
+- [x] Read-only account path — `AlpacaAccountReader` (`src/execution/broker_alpaca.py`)
+  wraps `AlpacaBroker` by composition and exposes only `get_account`/`list_positions`,
+  with no order-placing method reachable. `scan_signals.py`, `congress_copy/run.py`,
+  `run_discovery.py`, `run_self_heal.py`, and `demo_trade.py` (all read-only callers
+  outside `src/execution/`) now construct this instead of the full `AlpacaBroker`.
+  Still holds trading credentials under the hood (Alpaca ties account reads to the
+  trading key, no separate read-only key type exists), but can never place, replace,
+  or cancel an order even after a future edit to these call sites.
 - Move remaining hardcoded params to config.
 
 ## Findings
@@ -176,8 +247,11 @@ weights, congress filters, universe extras).
 
 ## Open decisions
 
-- Stop vs stop-limit (gap-down risk).
+None currently open.
 
 Resolved (see docs/STRATEGIES.md "Decided" and "Recent risk-layer changes"):
 confirmation/rejection candle definitions, "recent" S/R window for breakout,
-shorts-vs-longs-only, sentiment-feed-down behavior.
+shorts-vs-longs-only, sentiment-feed-down behavior. Stop vs stop-limit
+(gap-down risk) — decided in favor of stop-market, with real-fill-price gap
+detection to compensate; see docs/SAFEGUARDS.md "Stop order type (gap-down
+risk) — decided".

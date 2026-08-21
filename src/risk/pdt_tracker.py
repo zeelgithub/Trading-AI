@@ -40,8 +40,10 @@ class PdtTracker:
         for d in self._dates:
             if d > asof:
                 continue
-            # busday_count is exclusive of the end date; +1 counts asof itself.
-            elapsed = int(np.busday_count(d, asof)) + (0 if d == asof else 0)
+            # busday_count(d, asof) excludes asof itself, so a trade made ON
+            # asof already elapses 0 -- exactly what we want (day 0 of the
+            # window), no separate same-day term needed.
+            elapsed = int(np.busday_count(d, asof))
             if elapsed < self.window:
                 count += 1
         return count

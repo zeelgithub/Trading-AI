@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import pytest
+
 from src.common.config import load_config
 from src.common.logging import AuditLog
 from src.common.models import Side
@@ -35,6 +37,14 @@ def exit_frame(_symbol=None):
     """Price has lost the 50 EMA -> trend opposite-EMA exit; no new MR setup."""
     return make_features([{"close": 95, "open": 96, "ema50": 100, "ema200": 90,
                            "bb_lower": 93, "bb_upper": 110, "adx": 20, "atr": 1.0}])
+
+
+class _CapturingNotifier:
+    def __init__(self):
+        self.alerts: list[tuple[str, str]] = []
+
+    def alert(self, event: str, detail: str = "") -> None:
+        self.alerts.append((event, detail))
 
 
 def make_orch(broker, tmp_path, execute=False, halt_store=None, **kw):
@@ -177,3 +187,67 @@ def test_opposite_ema_exit_closes_position(tmp_path):
     assert not report.halted
     assert ("AAPL", "opposite_ema_break") in report.exited
     assert broker.closed == ["AAPL"]
+
+
+def _seed_auto_closed_position(tmp_path, stop_order: OrderView, notifier):
+    """A position the bot thinks is OPEN, but is gone from the broker with no
+    open orders left for it -- reconciler flags this `auto_closed` (stop fired
+    or an external/manual close)."""
+    broker = FakeBroker(positions=[], auto_fill=False)
+    broker.seed_order(stop_order)
+    orch = Orchestrator(
+        broker=broker, feature_provider=exit_frame, execute=True, notifier=notifier,
+        state_store=StateStore(tmp_path / "p.json"),
+        halt_store=HaltStore(tmp_path / "h.json"), audit=AuditLog(tmp_path / "a.jsonl"),
+        scoreboard=Scoreboard(tmp_path / "sb.json"),
+    )
+    orch.positions = {
+        "AAPL": ManagedPosition(
+            symbol="AAPL", side=Side.LONG, qty=50, strategy="trend_following",
+            entry_order_id="e1", stop_order_id=stop_order.id, current_stop=90.0,
+            ratchet=PercentRatchet(entry=100.0, side=Side.LONG, initial_stop_pct=10.0),
+            status=PositionStatus.OPEN, filled_qty=50,
+        )
+    }
+    return orch
+
+
+def test_auto_close_with_gap_slippage_fires_incident_alert(tmp_path):
+    # Filled well below the 90.0 stop -- a real gap-down, not a clean stop-out.
+    stop = OrderView(id="s1", client_order_id="c", symbol="AAPL", qty=50, side="sell",
+                     type="stop", status="filled", stop_price=90.0, filled_avg_price=85.0)
+    notifier = _CapturingNotifier()
+    orch = _seed_auto_closed_position(tmp_path, stop, notifier)
+
+    report = orch.run_cycle()
+
+    assert not report.halted
+    assert orch.positions["AAPL"].status == PositionStatus.CLOSED
+    events = [e for e, _ in notifier.alerts]
+    assert "incident" in events
+    assert "fill" not in events   # the incident alert replaces the routine one, doesn't duplicate
+    detail = dict(notifier.alerts)["incident"]
+    assert "AAPL" in detail and "5.6%" in detail
+    sb = Scoreboard(tmp_path / "sb.json").load()
+    # (85 - 100) * 50 = -750, using the REAL fill price, not the 90.0 stop level.
+    assert sb["trend_following"].live_total_pnl == pytest.approx(-750.0)
+
+
+def test_auto_close_without_real_fill_price_falls_back_quietly(tmp_path):
+    # Canceled, not filled (e.g. a manual close at the broker cancels the stop
+    # leg instead of filling it) -- no fill price to compare, so no incident
+    # claim should be made; this must not regress to the old routine alert.
+    stop = OrderView(id="s1", client_order_id="c", symbol="AAPL", qty=50, side="sell",
+                     type="stop", status="canceled", stop_price=90.0)
+    notifier = _CapturingNotifier()
+    orch = _seed_auto_closed_position(tmp_path, stop, notifier)
+
+    report = orch.run_cycle()
+
+    assert not report.halted
+    events = [e for e, _ in notifier.alerts]
+    assert "incident" not in events
+    assert "fill" in events
+    sb = Scoreboard(tmp_path / "sb.json").load()
+    # Falls back to the stop level: (90 - 100) * 50 = -500.
+    assert sb["trend_following"].live_total_pnl == pytest.approx(-500.0)

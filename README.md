@@ -35,8 +35,9 @@ originate one.
   each active only in the market regime it's suited for (ADX/EMA-based filter).
 - **Risk gate with real fail-safes** — daily-loss kill switch, max position/gross
   exposure caps, PDT tracking, fat-finger band, duplicate-order guard.
-- **No naked positions** — every entry submits with a protective stop atomically
-  (bracket/OCO for take-profit).
+- **No naked positions** — a position is never marked open until its protective
+  stop (GTC, standalone; OCO with a take-profit) is confirmed resting at the
+  broker.
 - **Default-to-halt safety** — disconnects, stale data, or a reconciliation
   mismatch stop the bot rather than let it guess; halts persist until you
   manually clear them.

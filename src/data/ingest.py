@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
+from datetime import date
 
 import pandas as pd
 
@@ -45,7 +46,7 @@ def normalize_bars(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def last_bar_age_days(df: pd.DataFrame, today: "date | None" = None) -> int | None:
+def last_bar_age_days(df: pd.DataFrame, today: date | None = None) -> int | None:
     """Calendar days between the newest bar and `today` (None if no bars).
 
     The freshness contract for a daily-swing system: a Friday bar is age 1-3
@@ -54,10 +55,8 @@ def last_bar_age_days(df: pd.DataFrame, today: "date | None" = None) -> int | No
     """
     if df is None or df.empty or not isinstance(df.index, pd.DatetimeIndex):
         return None  # no bars / non-time index: age unknown, caller decides
-    from datetime import date as _date
-
     last = pd.Timestamp(df.index[-1]).date()
-    ref = today or _date.today()
+    ref = today or date.today()
     return (ref - last).days
 
 

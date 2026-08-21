@@ -22,7 +22,7 @@ from src.core.state_store import HaltStore, StateStore
 from src.discovery.builder import build_discovery_pipeline
 from src.discovery.ledger import DiscoveryLedger
 from src.discovery.pipeline import Account
-from src.execution.broker_alpaca import AlpacaBroker
+from src.execution.broker_alpaca import AlpacaAccountReader
 from src.notify.digest import idea_text, ideas_header
 from src.notify.telegram import build_notifier
 
@@ -36,7 +36,7 @@ def main() -> None:
     args = parser.parse_args()
 
     config = load_config()
-    broker = AlpacaBroker()
+    broker = AlpacaAccountReader()
     account_raw = broker.get_account()
     account = Account(
         equity=account_raw.equity,

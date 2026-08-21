@@ -99,19 +99,20 @@ This is the single precision bar `initial_stop_pct`-style tuning applies to; rai
 
 ## Validation status
 
-Updated 2026-08-10 (latest of three re-runs same day — widened history, then two
-risk-layer changes that both affect which trades clear the gate; see "Recent
-risk-layer changes" below). `--full-refetch --lookback-days 1500` (~4.1 years,
-1029 trading days, vs. the original 14-month/8-trade window), 27-symbol research
-universe + SPY:
+Updated 2026-08-10 (latest of four re-runs same day — widened history, two
+risk-layer changes, then a survivorship-bias fix + a backtester bug fix; see
+"Recent risk-layer changes" and "Survivorship-bias fix" below).
+`--full-refetch --lookback-days 1500` (~4.1 years, 1029 trading days), 34-symbol
+research universe (27 still-listed large caps + 6 real US-equity delistings
+inside the window — see "Survivorship-bias fix") + SPY:
 
 | strategy | trades | win% | PF | p(adj) | verdict |
 |---|---|---|---|---|---|
-| trend_following | 42 | 45.2 | 3.51 | 0.045 | **VALIDATED** |
-| breakout | 179 | 39.7 | 1.71 | 0.055 | INCONCLUSIVE (just above the 0.05 bar) |
-| mean_reversion | 47 | 38.3 | 0.57 | 1.000 | NOISE — and net-negative (PF < 1) |
+| trend_following | 43 | 46.5 | 3.64 | 0.037 | **VALIDATED** |
+| breakout | 186 | 39.2 | 1.70 | 0.054 | INCONCLUSIVE (just above the 0.05 bar) |
+| mean_reversion | 48 | 37.5 | 0.56 | 1.000 | NOISE — and net-negative (PF < 1); disabled via rotation |
 
-Portfolio (all three combined): +38.4% return, Sharpe 1.34, maxDD -5.4%, 268 trades.
+Portfolio (all three combined): +38.5% return, Sharpe 1.30, maxDD -5.4%, 277 trades.
 Buy-and-hold SPY over the same window: +113.5% return, Sharpe 1.24. The strategies
 underperform on raw return but beat SPY's Sharpe with roughly a third of its
 drawdown — expected, since the risk gate caps exposure (max 10 positions, a
@@ -119,6 +120,41 @@ fraction of budget risked each, further rationed by the aggregate open-risk cap
 below) rather than staying 100%-invested like a passive benchmark; it is not
 evidence the bot is broken, but it does mean "beats SPY on return" is not a claim
 this system can make.
+
+### Survivorship-bias fix (both changes same day, both affect the numbers above)
+
+- **Universe**: `settings.research.backtest_universe` (`config/settings.yaml`) added
+  6 symbols that actually delisted inside the backtest window — SIVB, FRC, SBNY
+  (Mar-May 2023 regional-bank failures), RAD (Rite Aid, Ch. 11 Oct 2023), YELL
+  (Yellow Corp, ceased operations Aug 2023), PRTY (Party City, Ch. 11 Jan 2023) —
+  confirmed via Alpaca to have clean history through their actual last trading day
+  (172-682 rows each, vs. 1029 for a symbol that traded the whole window).
+  The prior 27-symbol universe was exclusively still-listed survivors, which
+  `docs/DATA.md` names as a specific risk ("beware survivorship bias... include
+  delisted tickers for honest backtests") that the universe then walked straight
+  into. Deliberately excludes take-private/M&A delistings (TWTR, ATVI) — an
+  ownership change isn't a value-destroying failure, so it wouldn't correct
+  the bias this list exists to fix.
+- **Backtester bug fix** (`src/research/backtester.py` `Backtester.run`/`_manage`):
+  found while adding the symbols above. A position still open when its symbol's
+  data stream ends (delisting -- or previously, just the backtest window ending)
+  used to silently vanish: `today not in df.index` skipped it on every later date,
+  so it never became a `Trade` and never counted toward win%/PF/significance --
+  the most optimistic possible outcome for exactly the trades a survivorship-bias
+  fix exists to capture. Now the position force-closes at the last available price
+  on the last bar its symbol has (`reason="data_end"`), whether that's a delisting
+  or the ordinary end of the window. Regression test:
+  `tests/unit/test_backtester.py::test_position_still_open_when_data_ends_force_closes_at_last_price`.
+
+Net effect: small (trend_following 42->43 trades, breakout 179->186, mean_reversion
+47->48) -- the 6 added symbols are a small slice of 34, and each strategy's own
+selectivity limits how many signals any one symbol contributes. All three verdicts
+are unchanged (trend_following still VALIDATED, marginally better p=0.037;
+breakout still INCONCLUSIVE, p=0.054; mean_reversion still NOISE). That's a
+meaningful result in itself: the prior "VALIDATED" verdict wasn't quietly resting
+on excluding the failures, at least not within this 6-symbol correction -- but the
+universe is still not a rigorously complete delisted-ticker set, so treat this as
+a bias *reduced*, not a bias *eliminated*.
 
 ### Recent risk-layer changes (both same day, both affect the numbers above)
 
@@ -150,29 +186,85 @@ from 50→42 similarly) — not a strategy-logic change. The maxDD improvement
 
 Reading:
 - **trend_following** now clears `min_trades=30` with a real, Sidak-adjusted
-  p < 0.05 and the highest profit factor (3.51) of the three — the first strategy
+  p < 0.05 and the highest profit factor (3.64) of the three — the first strategy
   in this project with a statistically real edge on backtest data. Still "a floor
   to clear, not a green light to go live" (below).
 - **breakout** is a genuine borderline case sitting just past the significance
   threshold — worth more history or live paper-trading data before promoting or
   dropping it, not more parameter tuning.
-- **mean_reversion** remains net-negative (PF 0.57) across both re-runs. A real
-  candidate for `/review` → disable via rotation (`state/rotation.json`,
-  human-approved, never automatic) rather than further tuning.
+- **mean_reversion** remains net-negative (PF 0.56) across every re-run so far. A
+  real candidate for `/review` → disable via rotation (`state/rotation.json`,
+  human-approved, never automatic) rather than further tuning — already applied:
+  disabled in `state/rotation.json` as of 2026-08-10.
 
-None of this was tuned to look better than it is — no strategy parameter was
-touched in any of today's three re-runs; only the history window and (separately)
-two risk-layer fixes changed, and the fixes were made because they were real gaps,
-not to move these numbers.
+None of this was tuned to look better than it is — no strategy *parameter* was
+touched in any of today's four re-runs; only the history window, two risk-layer
+fixes, the validation universe, and (separately) a backtester bug fix changed,
+and each was made because it was a real gap, not to move these numbers.
+
+The one gap the above still doesn't touch: every number above comes from ONE
+in-sample backtest over the whole window — scored, in part, with the same data
+used to pick the regime/entry thresholds in the first place (see "Regime
+thresholds" above). "Walk-forward validation" below addresses that. The other
+remaining gap — no strategy has a single live or paper-traded fill yet — is
+still open; see `docs/ROADMAP.md` Step 7.
+
+## Walk-forward validation
+
+`src/research/walkforward.py` (`evaluate_walk_forward`, wired into
+`scripts/evaluate_strategies.py` by default — pass `--no-walk-forward` to skip
+it, `--folds N` to change the split) answers a narrower, honest question than
+the table above: does the SAME fixed logic (nothing is re-fit per fold — these
+strategies fit nothing) hold up across chronological slices it wasn't hand-tuned
+to fit, instead of one pooled in-sample number? It splits the window into
+`n_folds` sequential chunks and runs an independent backtest per fold — fresh
+equity, no carried-over positions, no entries before the fold's own start date
+(`Backtester.run(..., entries_start=...)`) — while still feeding each fold the
+FULL preceding history for indicator warmup (a fold doesn't get a stunted
+EMA200). A position still open at a fold boundary force-closes there via the
+same "data_end" mechanism from the survivorship-bias fix, so nothing leaks
+across folds.
+
+2026-08-10, 3 folds over the same 4.1-year/34-symbol run above:
+
+| fold | window | strategy | trades | win% | PF | p(raw) |
+|---|---|---|---|---|---|---|
+| 1 | 2022-07-05..2023-11-10 | trend_following | 6 | 50.0 | 3.33 | 0.102 |
+| 1 | 2022-07-05..2023-11-10 | breakout | 71 | 36.6 | 1.36 | 0.153 |
+| 1 | 2022-07-05..2023-11-10 | mean_reversion | 20 | 40.0 | 0.63 | 0.878 |
+| 2 | 2023-11-13..2025-03-27 | trend_following | 22 | 50.0 | 1.71 | 0.109 |
+| 2 | 2023-11-13..2025-03-27 | breakout | 70 | 41.4 | 1.46 | 0.123 |
+| 2 | 2023-11-13..2025-03-27 | mean_reversion | 15 | 46.7 | 0.83 | 0.607 |
+| 3 (holdout) | 2025-03-28..2026-08-10 | trend_following | 15 | 46.7 | 6.28 | 0.030 |
+| 3 (holdout) | 2025-03-28..2026-08-10 | breakout | 41 | 31.7 | 2.14 | 0.324 |
+| 3 (holdout) | 2025-03-28..2026-08-10 | mean_reversion | 12 | 16.7 | 0.21 | 0.999 |
+
+Per-fold trade counts are too small for a formal per-fold verdict (that's not
+the point — read PF direction, not p(raw), which is deliberately NOT
+Sidak-adjusted here). Reading:
+- **trend_following**: PF > 1 in all three folds (3.33, 1.71, 6.28), including
+  fold 3 — the only fold entirely outside the ~14-month window the regime
+  thresholds were originally tuned against, i.e. the closest thing this project
+  has to a genuine out-of-sample holdout. The in-sample VALIDATED verdict is
+  not resting on a period the thresholds were fitted to.
+- **breakout**: also PF > 1 in every fold (1.36, 1.46, 2.14) and, like
+  trend_following, strongest in the holdout fold — consistent with its
+  in-sample INCONCLUSIVE-but-close verdict; worth continued tracking, not
+  promotion or dismissal on this alone.
+- **mean_reversion**: PF < 1 in every fold, and getting WORSE over time (0.63 ->
+  0.83 -> 0.21) — sharper evidence for disabling it than the pooled PF 0.56
+  alone gave. Already disabled via rotation (see above).
 
 `scripts/evaluate_strategies.py` defaults to a wider, sector-diverse validation universe
-(`settings.research.backtest_universe`, ~27 symbols) — separate from the live watchlist,
-which stays small and explicit. Re-run after any strategy-logic OR risk-logic change,
-or periodically to extend the window as more live history accumulates:
+(`settings.research.backtest_universe`, 34 symbols, including delisted names — see
+"Survivorship-bias fix" above) — separate from the live watchlist, which stays small
+and explicit. Re-run after any strategy-logic OR risk-logic change, or periodically to
+extend the window as more live history accumulates:
 
     python -m scripts.evaluate_strategies --full-refetch --lookback-days 1500
 
-A "validated" verdict is a floor to clear, not authorization to trade live.
+A "validated" verdict — in-sample or walk-forward — is a floor to clear, not
+authorization to trade live.
 
 ## Sentiment gate (non-executing)
 

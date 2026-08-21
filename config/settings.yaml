@@ -39,6 +39,16 @@ alerts:
   # was sent regardless of this list). Confirmed via yaml.safe_load().
   events: [halt, kill_switch, reconciliation_mismatch, fill, daily_summary,
            watchdog, self_heal, incident]
+  # Every protective stop is a stop-MARKET, not stop-limit (deliberate -- see
+  # docs/SAFEGUARDS.md "Stop order type (gap-down risk)"): a stop-limit can go
+  # completely unfilled on a large gap, leaving a naked position, which is a
+  # worse failure than a guaranteed-but-imprecise fill. The tradeoff is that a
+  # gap CAN fill worse than the intended stop. Rather than change order type,
+  # the orchestrator fetches the stop leg's real fill price on auto-close and
+  # fires an `incident` alert (not just the usual `fill` one) when the fill is
+  # this many percent worse than the intended stop -- so a bad gap is surfaced
+  # immediately instead of blending into routine "position closed" noise.
+  gap_slippage_alert_pct: 2.0
 
 watchdog:
   # Independent probe (scripts/healthcheck.py) -- schedule it every ~15 min on
@@ -94,6 +104,17 @@ research:
   # liquid, sector-diverse large caps (tech, financials, healthcare, energy,
   # industrials, staples, media) so all three regimes (trending/ranging/
   # expansion) get real coverage. `--symbols` still overrides per run.
+  #
+  # The first 27 are all still-listed survivors -- picking "today's large
+  # caps" as the universe silently excludes every name that failed along the
+  # way (docs/DATA.md warns about exactly this). The rest are real US-equity
+  # delistings inside this window, confirmed to have Alpaca history through
+  # their actual last trading day: SIVB/FRC/SBNY (Mar-May 2023 bank
+  # failures), RAD (Rite Aid, Ch.11 Oct 2023), YELL (Yellow Corp, ceased ops
+  # Aug 2023), PRTY (Party City, Ch.11 Jan 2023). Deliberately excludes
+  # take-private/M&A delistings (TWTR, ATVI) -- those are an ownership
+  # change, not a value-destroying failure, so they don't correct the bias
+  # this list exists to fix.
   backtest_universe:
     [AAPL, MSFT, GOOGL, AMZN, NVDA, META, TSLA,
      JPM, BAC, WFC, GS,
@@ -102,7 +123,8 @@ research:
      HD, WMT, DIS, MCD,
      BA, CAT, GE,
      KO, PEP,
-     INTC, AMD]
+     INTC, AMD,
+     SIVB, FRC, SBNY, RAD, YELL, PRTY]
 
 discovery:
   # Autonomous idea discovery: gather candidates from multiple free signal
