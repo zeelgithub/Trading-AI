@@ -16,8 +16,10 @@ regime_filter:
   # See docs/STRATEGIES.md "Regime thresholds" for the full measurement.
   trending_adx_min: 32       # ADX >= 32 => trending
   ranging_adx_max: 28        # ADX <= 28 => ranging  (28-32 = dead zone, stand aside)
-  ema_fast: 50
-  ema_slow: 200
+  # How many bars back "rising ATR" (the expansion regime's other leg) looks --
+  # was hardcoded (_ATR_SLOPE_LOOKBACK in regime_filter.py) despite every other
+  # regime-filter number living here; moved out for consistency, same value.
+  atr_slope_lookback: 5
   routing:
     trending: trend_following
     ranging: mean_reversion
@@ -31,6 +33,10 @@ regime_filter:
 confirmation_candle:
   min_body_ratio: 0.5
 
+# Each strategy's `enabled:` is the default a FRESH deployment starts from
+# (no state/rotation.json yet -- see RotationState.is_enabled()); `/rotate`
+# overrides it per-deployment from then on. Editing this file never touches
+# an existing deployment's already-applied rotation decision.
 strategies:
 
   trend_following:
@@ -53,21 +59,52 @@ strategies:
       # must still be the confirmation/reclaim bar) found 635 -- ~36% more
       # genuine opportunity, same precision on the entry trigger itself.
       pullback_lookback_bars: 3
+      # "Pullback to 20 EMA" = a bar traded within this % of it. Was hardcoded
+      # (_PROXIMITY in trend_following.py) -- moved out for the same reason as
+      # atr_slope_lookback above; same value (0.02 = 2%).
+      pullback_proximity_pct: 2.0
     entry:
       long: "pullback to ema20 + bullish confirmation candle"
       short: "rejection from ema20 + bearish confirmation candle"
     exit: "opposite EMA break OR ratchet stop"
+    # Confidence scales with trend strength (ADX) above a baseline, capped --
+    # was hardcoded in trend_following.py's _intent(); same formula, same
+    # numbers: confidence = min(max, base + max(0, adx - adx_baseline) / adx_divisor).
+    confidence:
+      base: 0.55
+      adx_baseline: 25.0
+      adx_divisor: 100.0
+      max: 0.9
 
   mean_reversion:
-    enabled: true
+    # Disabled by default: backtested net-negative (PF 0.56-0.62, worsening
+    # across every walk-forward fold) -- see docs/STRATEGIES.md "Validation
+    # status". `/rotate enable mean_reversion` to turn it on anyway.
+    enabled: false
     direction: [long, short]
     indicators:
       bollinger_period: 20      # replaces VWAP (intraday-only) on daily bars
       bollinger_std: 2.0
       rsi_period: 14
     conditions:
-      long_setup: "price <= lower_band and rsi < 30"
-      short_setup: "price >= upper_band and rsi > 70"
+      long_setup: "price <= lower_band and rsi < rsi_oversold"
+      short_setup: "price >= upper_band and rsi > rsi_overbought"
+      # RSI extreme thresholds -- same class of fix as trend_following's
+      # rsi_long_band/rsi_short_band (config/strategies.yaml comment above):
+      # these were declared in prose here but hardcoded as literals in
+      # mean_reversion.py, so editing them would have silently done nothing.
+      # Wired through now; same values as before (30/70).
+      rsi_oversold: 30
+      rsi_overbought: 70
+      # Primary-trend direction filter (distinct from the regime filter's ADX
+      # gate above, which measures trend STRENGTH not DIRECTION): a long
+      # dip-buy would require close > ema200, a short rip-sell close < ema200.
+      # TESTED 2026-08-21 via evaluate_strategies --offline against this
+      # project's own 34-symbol/4.1-year cache and found to HURT, not help --
+      # see docs/STRATEGIES.md "Mean reversion trend filter (tested, rejected)".
+      # Left here, defaulted off, as reusable infrastructure for a future,
+      # better-targeted variant -- not because it's expected to help as-is.
+      require_trend_alignment: false
       # Same timing issue as trend_following's pullback, measured the same
       # way: requiring the band-touch/RSI-extreme and the reversal
       # confirmation candle on the IDENTICAL bar found only 1 qualifying day
@@ -80,6 +117,10 @@ strategies:
       long: "oversold + bullish confirmation candle"
       short: "overbought + bearish rejection candle"
     exit: "revert to mean (SMA20) OR +2% target; hard 2% stop"
+    # Flat confidence (this strategy's setup is binary -- touched the extreme
+    # + confirmed, or it didn't -- no continuous strength measure like ADX to
+    # scale off). Was hardcoded in mean_reversion.py's _intent(); same value.
+    confidence: 0.6
 
   breakout:
     enabled: true
@@ -94,15 +135,27 @@ strategies:
       volatility: "atr increasing"
     entry: "breakout confirmation candle close"
     exit: "ATR-based ratchet stop"
+    # Flat confidence, same reasoning as mean_reversion's above (binary setup,
+    # no continuous strength measure). Was hardcoded in breakout.py's
+    # _intent(); same value.
+    confidence: 0.65
 
 # Non-executing sentiment gate. NEVER triggers a trade — only gates/sizes.
 sentiment_gate:
   enabled: true
-  scores: [-1, 0, 1]            # -1 bearish, 0 neutral, +1 bullish
   rules:
     long_requires_min: 0        # longs require sentiment >= 0
     short_requires_max: 0       # shorts require sentiment <= 0
-    conflict_action: reduce_confidence
+  # Confidence multiplier applied when sentiment is merely neutral (neither
+  # confirming nor opposing) -- was hardcoded (_NEUTRAL_HAIRCUT in
+  # sentiment_gate.py); same value.
+  neutral_confidence_haircut: 0.8
+  # How many days of recent headlines the live scorer
+  # (src/strategy/news_sentiment_scorer.py, wired 2026-08-22) reads per
+  # symbol before voting bullish/bearish/neutral. Short on purpose -- this
+  # gates a trade being entered TODAY, not a ranking pass like discovery's
+  # own (longer) news.lookback_days in settings.yaml.
+  news_scorer_lookback_days: 3
   # Fail-safe when a wired scorer raises (network/API error): pass the intent
   # through this cycle unchanged rather than block/haircut/halt on an infra
   # hiccup. Implemented in SentimentGate.apply() (src/strategy/sentiment_gate.py) --

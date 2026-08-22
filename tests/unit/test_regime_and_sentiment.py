@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from src.common.config import load_config
 from src.common.models import Action, Intent, Regime, Side
 from src.strategy.regime_filter import RegimeFilter
 from src.strategy.sentiment_gate import SentimentGate
 from tests.unit.synth import flat_frame
-
 
 # --- Regime filter ---
 
@@ -50,6 +51,17 @@ def test_dead_zone_stands_aside():
     assert rf.active_strategy(df) is None
 
 
+def test_atr_slope_lookback_is_read_from_config():
+    # atr_slope_lookback governs how far back "rising ATR" compares against
+    # (was hardcoded as _ATR_SLOPE_LOOKBACK); confirm it's actually wired,
+    # not just defaulting to the same value the old constant had.
+    base = load_config()
+    strategies = {**base.strategies,
+                  "regime_filter": {**base.strategies["regime_filter"], "atr_slope_lookback": 1}}
+    rf = RegimeFilter(replace(base, strategies=strategies))
+    assert rf.atr_slope_lookback == 1
+
+
 # --- Sentiment gate ---
 
 def _long_intent(conf=0.7) -> Intent:
@@ -62,6 +74,23 @@ def test_neutral_sentiment_haircuts_confidence():
     out = gate.apply(_long_intent(0.7))
     assert out is not None
     assert out.confidence == 0.56  # 0.7 * 0.8
+
+
+def test_neutral_sentiment_haircut_is_config_driven():
+    """Regression guard: neutral_confidence_haircut is declared in
+    config/strategies.yaml but was hardcoded (_NEUTRAL_HAIRCUT) in the gate --
+    editing the config did nothing. Same setup as
+    test_neutral_sentiment_haircuts_confidence, but with the haircut
+    explicitly overridden to 0.5 via config."""
+    base = load_config()
+    strategies = {
+        **base.strategies,
+        "sentiment_gate": {**base.strategies["sentiment_gate"], "neutral_confidence_haircut": 0.5},
+    }
+    gate = SentimentGate(replace(base, strategies=strategies), scorer=None)  # all neutral (0)
+    out = gate.apply(_long_intent(0.7))
+    assert out is not None
+    assert out.confidence == 0.35  # 0.7 * 0.5
 
 
 def test_confirming_sentiment_keeps_confidence():

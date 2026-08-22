@@ -23,14 +23,12 @@ Boundary: places orders NO, can only veto/shrink, never originate.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
-from typing import Callable
 
 from src.common.config import Config
 from src.common.logging import get_logger
 from src.common.models import Intent, Side
-
-_NEUTRAL_HAIRCUT = 0.8
 
 log = get_logger("sentiment_gate")
 
@@ -42,6 +40,7 @@ class SentimentGate:
         rules = sg.get("rules", {})
         self.long_requires_min = int(rules.get("long_requires_min", 0))
         self.short_requires_max = int(rules.get("short_requires_max", 0))
+        self.neutral_haircut = float(sg.get("neutral_confidence_haircut", 0.8))
         self._scorer = scorer
 
     def score(self, symbol: str) -> int:
@@ -72,4 +71,4 @@ class SentimentGate:
         confirms = (intent.side == Side.LONG and s > 0) or (intent.side == Side.SHORT and s < 0)
         if confirms:
             return intent
-        return replace(intent, confidence=round(intent.confidence * _NEUTRAL_HAIRCUT, 4))
+        return replace(intent, confidence=round(intent.confidence * self.neutral_haircut, 4))

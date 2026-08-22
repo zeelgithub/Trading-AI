@@ -46,6 +46,18 @@ def test_rate_limit_per_minute_and_expiry():
     assert cb.check_rate_limits(now=1061.0).ok            # both aged out
 
 
+def test_rate_limit_window_is_actually_config_driven():
+    """Regression guard: order_rate_window_seconds was hardcoded to 60.0 in
+    _expire() -- config could set max_orders_per_minute but never the window
+    itself. A 5s window must expire an order well before the default 60s
+    would."""
+    cb = make_breakers(order_rate_window_seconds=5.0)
+    cb.register_order(now=1000.0)
+    cb.register_order(now=1000.0)
+    assert not cb.check_rate_limits(now=1000.0).ok        # 2 within the 5s window
+    assert cb.check_rate_limits(now=1006.0).ok             # both aged out after 5s (would still be within the default 60s)
+
+
 def test_rate_limit_per_day():
     cb = make_breakers(max_orders_per_minute=100)
     for t in range(3):

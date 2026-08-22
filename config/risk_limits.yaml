@@ -19,27 +19,37 @@ account:
   max_open_positions: 10
 
 position:
+  # Percentage-based, so these scale to any account size on their own -- but
+  # sizing (src/risk/position_sizer.py) always rounds DOWN to a whole share
+  # (no fractional-share support), and a strategy that can't size to at least
+  # 1 share is vetoed outright ("sized to zero"), not resized smaller. On a
+  # very small account (a few hundred dollars) with a tight stop and a
+  # higher-priced symbol, 1% of equity / |entry-stop| can floor to 0 shares
+  # more often than you'd expect from the percentages alone -- if entries are
+  # being silently vetoed, check risk_dollars vs entry_price*|entry-stop| for
+  # the specific symbol before assuming something's broken.
   max_position_pct: 10.0            # max single position vs equity
   max_per_symbol_pct: 10.0
   per_trade_risk_pct: 1.0          # equity risked per trade (drives position sizing)
 
 allocation:
   # Equal risk budget across the three strategies (~1/3 of daily risk each).
-  scheme: equal_risk
   per_strategy_risk_pct: 1.33
 
 circuit_breakers:
   max_orders_per_minute: 10        # runaway-loop guard
+  order_rate_window_seconds: 60    # the rolling window max_orders_per_minute counts over -- was hardcoded
   max_orders_per_day: 50
   max_consecutive_errors: 5        # then HALT
   fat_finger_price_band_pct: 20.0  # reject orders priced >20% off last quote
   require_manual_reset_after_kill: true   # bot does NOT self-resume after a kill
 
-pdt:
-  # Account funded above $25k => standard rules, but still tracked.
-  enforce: true
-  min_equity_for_daytrading: 25000
-  max_day_trades_rolling_5d: 3     # only enforced if equity dips below threshold
+# pdt: section removed 2026-08-21 -- FINRA retired the Pattern Day Trader
+# rule (Regulatory Notice 26-10, effective 2026-06-04) for a dynamic
+# intraday-margin framework, and Alpaca removed the daytrade_count/
+# pattern_day_trader API fields on 2026-07-06. The gate this config drove
+# was also confirmed dead independent of that: every caller hardcoded
+# is_intraday=False, so it never fired for this daily-swing bot regardless.
 
 # NOTE (honest config): connectivity handling is not a separate subsystem.
 # Any broker/data API failure raises and the orchestrator's default-to-halt

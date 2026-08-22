@@ -3,7 +3,7 @@ Risk Gatekeeper -- risk layer.
 
 The single checkpoint between a strategy Intent and the Execution layer. It runs
 every intent through the deterministic guards (kill switch, exposure, sizing,
-PDT, rate limits) and returns a RiskDecision: APPROVE (with the final quantity),
+rate limits) and returns a RiskDecision: APPROVE (with the final quantity),
 RESIZE (approved but smaller than suggested), or VETO.
 
 Pure logic, no network I/O. The ONLY path to execution.
@@ -17,10 +17,9 @@ from dataclasses import dataclass, field
 from datetime import date
 
 from src.common.config import Config, load_config
-from src.common.models import Decision, Intent, RiskDecision, Side
+from src.common.models import Decision, Intent, RiskDecision
 from src.risk import position_sizer
 from src.risk.circuit_breakers import CircuitBreakers
-from src.risk.pdt_tracker import PdtTracker
 from src.risk.ratchet_stop import build_ratchet
 
 
@@ -37,9 +36,7 @@ class AccountState:
     # stop fired today. Defaults to 0.0 (no-op / not tracked) for callers that
     # don't yet compute it; see RiskManager.evaluate() step 7.5.
     open_risk_dollars: float = 0.0
-    is_intraday: bool = False
     as_of: date = field(default_factory=date.today)
-    day_trade_count: int | None = None  # broker-reported, for reconciliation
 
 
 def _veto(intent: Intent, reason: str) -> RiskDecision:
@@ -57,16 +54,22 @@ class RiskManager:
             max_orders_per_day=int(cb.get("max_orders_per_day", 50)),
             max_consecutive_errors=int(cb.get("max_consecutive_errors", 5)),
             fat_finger_price_band_pct=float(cb.get("fat_finger_price_band_pct", 20.0)),
-        )
-        pdt = rl.get("pdt", {})
-        self.pdt = PdtTracker(
-            min_equity_for_daytrading=float(pdt.get("min_equity_for_daytrading", 25000.0)),
-            max_day_trades_rolling_5d=int(pdt.get("max_day_trades_rolling_5d", 3)),
+            order_rate_window_seconds=float(cb.get("order_rate_window_seconds", 60.0)),
         )
 
     # --- limits helpers ---
     def _ratchet_params(self, strategy: str) -> dict:
         return self.config.risk_limits.get("ratchet_stop", {}).get(strategy, {})
+
+    def _max_position_pct(self, symbol: str, default: float) -> float:
+        """config/symbols.yaml per-symbol overrides.max_position_pct wins over
+        the global default (risk_limits.yaml position.max_position_pct) --
+        purely additive: a symbol with no override behaves exactly as before."""
+        for entry in self.config.symbols.get("watchlist", []) or []:
+            if entry.get("symbol") == symbol:
+                override = entry.get("overrides", {}).get("max_position_pct")
+                return float(override) if override is not None else default
+        return default
 
     def _initial_stop(self, intent: Intent, entry: float) -> float | None:
         if intent.stop_loss is not None:
@@ -102,12 +105,16 @@ class RiskManager:
         if not rate.ok:
             return _veto(intent, rate.reason)
 
-        # 4. PDT (only relevant for intraday round-trips).
-        if account.is_intraday:
-            if account.day_trade_count is not None:
-                self.pdt.sync_broker_count(account.day_trade_count, account.as_of)
-            if not self.pdt.can_day_trade(account.equity, account.as_of):
-                return _veto(intent, "PDT limit: day-trade cap reached for the window")
+        # step 4 (PDT gate) removed 2026-08-21: FINRA retired the Pattern Day
+        # Trader rule (Regulatory Notice 26-10, effective 2026-06-04) in favor
+        # of a dynamic intraday-margin framework, and Alpaca removed the
+        # daytrade_count/pattern_day_trader API fields on 2026-07-06. The
+        # gate was also confirmed dead independent of that: every caller
+        # (orchestrator/discovery/trade_service) hardcoded is_intraday=False,
+        # so it never fired for this daily-swing bot regardless. Step numbers
+        # below are left as-is (not renumbered) so existing cross-references
+        # in docs/STRATEGIES.md, docs/SAFEGUARDS.md etc. ("step 7", "step 7.5")
+        # stay accurate.
 
         # 5. Need an entry and a stop to size the trade. Prefer the strategy's
         #    own entry_price; fall back to the latest market price.
@@ -139,7 +146,8 @@ class RiskManager:
             alloc.get("per_strategy_risk_pct", pos.get("per_trade_risk_pct", 1.0))
         )
         per_trade_risk *= max(0.0, min(1.0, intent.confidence))
-        max_position_pct = float(pos.get("max_position_pct", 10.0))
+        max_position_pct = self._max_position_pct(
+            intent.symbol, float(pos.get("max_position_pct", 10.0)))
         sizing = position_sizer.size_position(
             equity=account.equity,
             entry_price=entry,
@@ -208,6 +216,3 @@ class RiskManager:
     # --- post-execution registration (called by orchestrator on a real fill) ---
     def on_order_submitted(self) -> None:
         self.breakers.register_order()
-
-    def on_day_trade(self, trade_date: date) -> None:
-        self.pdt.register_day_trade(trade_date)

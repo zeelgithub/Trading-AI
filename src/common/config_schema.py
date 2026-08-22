@@ -52,22 +52,16 @@ class PositionLimits(_Lenient):
 
 
 class AllocationLimits(_Lenient):
-    scheme: str = "equal_risk"
     per_strategy_risk_pct: float = Field(1.33, gt=0, le=100)
 
 
 class CircuitBreakerLimits(_Lenient):
     max_orders_per_minute: int = Field(10, gt=0)
+    order_rate_window_seconds: int = Field(60, gt=0)
     max_orders_per_day: int = Field(50, gt=0)
     max_consecutive_errors: int = Field(5, gt=0)
     fat_finger_price_band_pct: float = Field(20.0, gt=0)
     require_manual_reset_after_kill: bool = True
-
-
-class PdtLimits(_Lenient):
-    enforce: bool = True
-    min_equity_for_daytrading: float = Field(25000.0, gt=0)
-    max_day_trades_rolling_5d: int = Field(3, ge=0)
 
 
 class RatchetParams(_Lenient):
@@ -85,7 +79,7 @@ class RatchetParams(_Lenient):
     atr_multiple_trail: float | None = Field(default=None, gt=0)
 
     @model_validator(mode="after")
-    def _one_family_present(self) -> "RatchetParams":
+    def _one_family_present(self) -> RatchetParams:
         if self.initial_stop_pct is None and self.atr_multiple_initial is None:
             raise ValueError(
                 "needs initial_stop_pct (percent ratchet) or "
@@ -98,7 +92,6 @@ class RiskLimitsSchema(_Lenient):
     position: PositionLimits = Field(default_factory=PositionLimits)
     allocation: AllocationLimits = Field(default_factory=AllocationLimits)
     circuit_breakers: CircuitBreakerLimits = Field(default_factory=CircuitBreakerLimits)
-    pdt: PdtLimits = Field(default_factory=PdtLimits)
     ratchet_stop: dict[str, RatchetParams] = Field(default_factory=dict)
 
 
@@ -143,7 +136,6 @@ class ApprovalSettings(_Lenient):
 
 class AlertsSettings(_Lenient):
     enabled: bool = True
-    channel: str = "telegram"
     events: list[str] = Field(default_factory=list)
 
 
@@ -168,6 +160,13 @@ class ConcurrencySettings(_Lenient):
     action_lock_timeout_seconds: int = Field(15, gt=0)
 
 
+class ExecutionSettings(_Lenient):
+    # Alpaca auto-cancels a GTC order 90 days after creation/last-modification
+    # (docs.alpaca.markets/us/docs/orders-at-alpaca) -- must stay under 90 or
+    # every resting stop would qualify for refresh on every cycle.
+    stop_refresh_min_days_remaining: int = Field(15, gt=0, lt=90)
+
+
 class SettingsSchema(_Lenient):
     mode: Literal["paper", "live"] = "paper"
     data: DataSettings = Field(default_factory=DataSettings)
@@ -179,16 +178,114 @@ class SettingsSchema(_Lenient):
     backtest: BacktestSettings = Field(default_factory=BacktestSettings)
     self_heal: SelfHealSettings = Field(default_factory=SelfHealSettings)
     concurrency: ConcurrencySettings = Field(default_factory=ConcurrencySettings)
+    execution: ExecutionSettings = Field(default_factory=ExecutionSettings)
 
 
-def validate_config(settings: dict[str, Any], risk_limits: dict[str, Any]) -> None:
-    """Validate the raw settings/risk_limits mappings. Raises ConfigError with
-    every problem listed (not just the first) on any type/range violation."""
+# --- strategies.yaml ------------------------------------------------------
+
+class RegimeFilterSchema(_Lenient):
+    enabled: bool = True
+    adx_period: int = Field(14, gt=0)
+    trending_adx_min: float = Field(25.0, gt=0, le=100)
+    ranging_adx_max: float = Field(20.0, gt=0, le=100)
+    atr_slope_lookback: int = Field(5, gt=0)
+    routing: dict[str, str] = Field(default_factory=dict)
+
+
+class ConfirmationCandleSchema(_Lenient):
+    min_body_ratio: float = Field(0.5, gt=0, le=1)
+
+
+class TrendConfidenceSchema(_Lenient):
+    """trend_following's ADX-scaled confidence formula: min(max, base +
+    max(0, adx - adx_baseline) / adx_divisor)."""
+    base: float = Field(0.55, ge=0, le=1)
+    adx_baseline: float = Field(25.0, ge=0)
+    adx_divisor: float = Field(100.0, gt=0)
+    max: float = Field(0.9, ge=0, le=1)
+
+
+class StrategyBlockSchema(_Lenient):
+    """One strategy's block under strategies.strategies.<name>. Deliberately
+    loose beyond `enabled`/`direction`/`confidence` -- indicators/conditions/
+    entry/exit vary per strategy and are mostly descriptive text, not
+    machine-parsed, so they aren't worth a rigid schema; `extra="allow"`
+    still passes them through untouched for the strategy classes themselves
+    to read. `confidence` gets its own check since it directly scales
+    position sizing (RiskManager.evaluate() step 7) -- real financial risk,
+    not just descriptive config."""
+    enabled: bool = True
+    direction: list[str] = Field(default_factory=lambda: ["long", "short"])
+    confidence: float | TrendConfidenceSchema | None = None
+
+    @model_validator(mode="after")
+    def _flat_confidence_in_range(self) -> StrategyBlockSchema:
+        if isinstance(self.confidence, float) and not (0.0 <= self.confidence <= 1.0):
+            raise ValueError("confidence must be between 0 and 1")
+        return self
+
+
+class SentimentGateSchema(_Lenient):
+    enabled: bool = True
+    neutral_confidence_haircut: float = Field(0.8, gt=0, le=1)
+    news_scorer_lookback_days: int = Field(3, gt=0)
+    on_feed_unavailable: str = "skip_gate"
+
+
+class StrategiesSchema(_Lenient):
+    regime_filter: RegimeFilterSchema = Field(default_factory=RegimeFilterSchema)
+    confirmation_candle: ConfirmationCandleSchema = Field(default_factory=ConfirmationCandleSchema)
+    strategies: dict[str, StrategyBlockSchema] = Field(default_factory=dict)
+    sentiment_gate: SentimentGateSchema = Field(default_factory=SentimentGateSchema)
+
+
+# --- symbols.yaml ----------------------------------------------------------
+
+class SymbolOverrides(_Lenient):
+    # The only override RiskManager currently reads (per-symbol max position
+    # size cap) -- see RiskManager._max_position_pct.
+    max_position_pct: float | None = Field(default=None, gt=0, le=100)
+
+
+class WatchlistEntry(_Lenient):
+    symbol: str
+    enabled: bool = True
+    allow_short: bool = False
+    overrides: SymbolOverrides = Field(default_factory=SymbolOverrides)
+
+    @field_validator("symbol")
+    @classmethod
+    def _symbol_not_blank(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("symbol must be a non-empty string")
+        return v
+
+
+class SymbolsSchema(_Lenient):
+    watchlist: list[WatchlistEntry] = Field(default_factory=list)
+    defaults: dict[str, Any] = Field(default_factory=dict)
+
+
+def validate_config(
+    settings: dict[str, Any],
+    risk_limits: dict[str, Any],
+    strategies: dict[str, Any] | None = None,
+    symbols: dict[str, Any] | None = None,
+) -> None:
+    """Validate the raw config mappings. Raises ConfigError with every problem
+    listed (not just the first) on any type/range violation. strategies/symbols
+    are optional params (default None -> skipped) so existing callers that only
+    pass settings/risk_limits keep working unchanged."""
     errors: list[str] = []
-    for label, schema, payload in (
+    checks = [
         ("settings.yaml", SettingsSchema, settings),
         ("risk_limits.yaml", RiskLimitsSchema, risk_limits),
-    ):
+    ]
+    if strategies is not None:
+        checks.append(("strategies.yaml", StrategiesSchema, strategies))
+    if symbols is not None:
+        checks.append(("symbols.yaml", SymbolsSchema, symbols))
+    for label, schema, payload in checks:
         try:
             schema.model_validate(payload)
         except Exception as exc:  # pydantic.ValidationError

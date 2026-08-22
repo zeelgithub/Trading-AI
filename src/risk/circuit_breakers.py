@@ -40,12 +40,14 @@ class CircuitBreakers:
         max_orders_per_day: int,
         max_consecutive_errors: int,
         fat_finger_price_band_pct: float,
+        order_rate_window_seconds: float = 60.0,
     ) -> None:
         self.max_daily_loss_pct = max_daily_loss_pct
         self.max_orders_per_minute = max_orders_per_minute
         self.max_orders_per_day = max_orders_per_day
         self.max_consecutive_errors = max_consecutive_errors
         self.fat_finger_price_band_pct = fat_finger_price_band_pct
+        self.order_rate_window_seconds = order_rate_window_seconds
 
         self._order_times: deque[float] = deque()
         self._orders_today = 0
@@ -115,7 +117,7 @@ class CircuitBreakers:
         self._order_day = None
 
     def _expire(self, now: float) -> None:
-        while self._order_times and now - self._order_times[0] > 60.0:
+        while self._order_times and now - self._order_times[0] > self.order_rate_window_seconds:
             self._order_times.popleft()
 
     # --- error counter ---

@@ -162,8 +162,8 @@ a bias *reduced*, not a bias *eliminated*.
   every strategy computes a `confidence` on its Intent (trend_following scales it
   with ADX strength; breakout and mean_reversion currently emit a fixed value),
   and the sentiment gate applies a haircut when sentiment is neutral
-  (`_NEUTRAL_HAIRCUT = 0.8` in `src/strategy/sentiment_gate.py` — the default
-  today, since no sentiment source is wired). This was previously computed and
+  (`config/strategies.yaml` → `sentiment_gate.neutral_confidence_haircut`,
+  default 0.8 — the default today, since no sentiment source is wired). This was previously computed and
   threaded through the whole pipeline but never consumed — sizing always risked
   the flat per-strategy budget regardless. Now the risk budget is scaled by
   `intent.confidence` (clamped to [0,1], so it only ever shrinks, never amplifies
@@ -265,6 +265,70 @@ extend the window as more live history accumulates:
 
 A "validated" verdict — in-sample or walk-forward — is a floor to clear, not
 authorization to trade live.
+
+## Tested, rejected: two research-backed hypotheses that didn't hold up
+
+2026-08-21, as part of an architecture/strategy review that also verified the
+indicator formulas (RSI/ATR/ADX all trace through as standard Wilder
+implementations; Bollinger std ddof=0 vs 1 has no clear official convention
+either way and a negligible effect at period=20 -- both left as-is). Two
+changes were well-grounded in general trading literature, implemented as
+config-toggleable additions, and tested against this project's own 34-symbol/
+4.1-year cached backtest via `evaluate_strategies --offline` before being kept
+or discarded -- same discipline as every other change in this file test
+first, keep only what the numbers support.
+
+### Mean reversion trend filter (tested, rejected)
+
+**Hypothesis:** mean_reversion's documented "falling knife" risk (buying an
+oversold stock that's oversold because it's in a structural downtrend, not a
+temporary stretch) is exactly what a long-term trend-direction filter is
+supposed to fix in the broader mean-reversion literature -- require
+`close > ema200` for a long dip-buy, `close < ema200` for a short rip-sell.
+Distinct from the regime filter's ADX gate above (trend STRENGTH, not
+DIRECTION).
+
+**Result:** worse on both axes at once. Trade count collapsed 48 -> 10 and
+win rate dropped 37.5% -> 30% (PF 0.56 -> 0.40). Inspecting the 10 surviving
+trades: the losses were ordinary large-caps hitting a routine 2% stop (JNJ,
+CAT, HD, GE, META), not the crisis/delisted names (SIVB, FRC, SBNY) the
+filter was conceptually meant to screen out. ema200 alignment -- a long-term,
+macro signal -- isn't the variable actually driving this SHORT-term (20-day
+Bollinger) strategy's weakness on this universe; it just cut the sample to a
+size too small to trust either way.
+
+**Disposition:** `require_trend_alignment` (`config/strategies.yaml` ->
+`mean_reversion.conditions`) defaults to `false`. Code kept as toggleable
+infrastructure, not deleted, in case a better-targeted variant (a shorter MA,
+a softer condition, a margin instead of a hard boundary) is worth trying once
+mean_reversion has more live/paper history to test against. Does not change
+mean_reversion's live status -- it's already disabled via rotation (NOISE,
+net-negative) independent of this filter.
+
+### Trend-following RSI band (tested, rejected)
+
+**Hypothesis:** this strategy's own documented "known risk" -- *"RSI <= 70
+cap can filter out the strongest trends"* -- is a real, literature-confirmed
+tradeoff (RSI can stay pinned extended through a genuine sustained trend, not
+just chop). Widening the band (40-70 -> 40-80 long, 30-60 -> 20-60 short)
+should let more of those trades through.
+
+**Result:** also worse on both axes. Trade count rose 43 -> 48 (+5), but win
+rate fell 46.5% -> 39.6% and PF fell 3.64 -> 2.49 -- enough to drop the
+verdict from VALIDATED to NOISE (p 0.037 -> 0.148, past the significance
+bar). The 5 additional trades the wider band let through were lower-quality
+on average, diluting the strategy's edge rather than capturing missed strong
+trends. Portfolio-wide effects were negative too (Sharpe 1.27 -> 1.04, maxDD
+-5.4% -> -6.9%) -- partly the strategy itself, partly the shared risk budget:
+more trend_following entries competing for the same daily risk allocation
+left less room for breakout's own signals (186 -> 183 trades).
+
+**Disposition:** bands stay at their original, evidence-tuned 40-70 / 30-60.
+Real, separate finding kept regardless of the rejected hypothesis: the bands
+were DECLARED in `config/strategies.yaml` but hardcoded as literals in
+`src/strategy/trend_following.py` -- editing the config silently did nothing.
+Now genuinely wired through, so a future, better-targeted variant is
+actually testable via config instead of requiring a code change.
 
 ## Sentiment gate (non-executing)
 
