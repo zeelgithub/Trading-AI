@@ -8,7 +8,7 @@ from src.core.state_store import HaltStore, StateStore
 from src.core.trade_service import TradeService
 from src.execution.order_manager import PositionStatus
 from tests.unit.fakes import FakeBroker
-from tests.unit.synth import make_features
+from tests.unit.synth import make_features, small_universe_config
 
 
 def trending_long(_symbol=None):
@@ -24,6 +24,7 @@ def trending_long(_symbol=None):
 
 
 def make_orch(broker, tmp_path, **kw):
+    kw.setdefault("config", small_universe_config())
     return Orchestrator(
         broker=broker, feature_provider=trending_long, propose=True,
         state_store=StateStore(tmp_path / "p.json"),
@@ -53,6 +54,7 @@ def test_approving_a_proposal_opens_a_protected_position(tmp_path):
         state_store=StateStore(tmp_path / "live.json"),
         halt_store=HaltStore(tmp_path / "h.json"),
         price_fn=lambda s: 105.0,
+        audit=AuditLog(tmp_path / "audit.jsonl"),
     )
     result = svc.execute_approved(proposals[0])
     assert result.ok and result.status == "placed"

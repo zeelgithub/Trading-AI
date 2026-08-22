@@ -6,7 +6,11 @@ strategy's *decision logic* is exercised in isolation, deterministically.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pandas as pd
+
+from src.common.config import load_config
 
 COLS = [
     "open", "high", "low", "close", "volume",
@@ -40,3 +44,16 @@ def flat_frame(n: int, value: float = 100.0, volume: float = 1e6, **last_overrid
     for col, val in last_overrides.items():
         df.iloc[-1, df.columns.get_loc(col)] = val
     return df
+
+
+def small_universe_config(symbols=("AAPL", "MSFT", "SPY")):
+    """A Config with an explicit small watchlist, decoupled from however many
+    symbols the real config/symbols.yaml happens to have (that list is a live
+    deployment setting, widened 2026-08-22 -- orchestrator tests that assert
+    an exact per-symbol count need a fixed, test-owned universe instead of
+    silently inheriting whatever the real watchlist grows to)."""
+    watchlist = [{"symbol": s, "enabled": True, "allow_short": False} for s in symbols]
+    return replace(load_config(), symbols={
+        "watchlist": watchlist,
+        "defaults": {"allow_short": False},
+    })

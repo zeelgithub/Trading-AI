@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from src.common.logging import AuditLog
 from src.core.proposals import Proposal
 from src.core.state_store import HaltStore, StateStore
 from src.core.trade_service import TradeService
@@ -11,6 +12,7 @@ from tests.unit.fakes import FakeBroker
 
 
 def make_service(broker, tmp_path, **kw):
+    kw.setdefault("audit", AuditLog(tmp_path / "audit.jsonl"))
     return TradeService(
         broker=broker,
         state_store=StateStore(tmp_path / "positions.json"),
@@ -61,8 +63,7 @@ def test_risk_trims_oversized_order(tmp_path):
 
 
 def test_kill_switch_vetoes(tmp_path):
-    acct = AccountView(equity=45000, last_equity=50000, buying_power=200000,
-                       daytrade_count=0, pattern_day_trader=False)
+    acct = AccountView(equity=45000, last_equity=50000, buying_power=200000)
     svc = make_service(FakeBroker(account=acct), tmp_path)
     result = svc.place_manual("NVDA", 10)
     assert not result.ok and result.status == "vetoed"

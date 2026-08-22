@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -16,7 +17,7 @@ from src.execution.order_manager import ManagedPosition, PositionStatus
 from src.research.scoreboard import Scoreboard
 from src.risk.ratchet_stop import PercentRatchet
 from tests.unit.fakes import FakeBroker
-from tests.unit.synth import make_features
+from tests.unit.synth import make_features, small_universe_config
 
 
 def approve_frame(_symbol=None):
@@ -47,9 +48,10 @@ class _CapturingNotifier:
         self.alerts.append((event, detail))
 
 
-def make_orch(broker, tmp_path, execute=False, halt_store=None, **kw):
+def make_orch(broker, tmp_path, execute=False, halt_store=None, feature_provider=approve_frame, **kw):
+    kw.setdefault("config", small_universe_config())
     return Orchestrator(
-        broker=broker, feature_provider=approve_frame, execute=execute,
+        broker=broker, feature_provider=feature_provider, execute=execute,
         state_store=StateStore(tmp_path / "positions.json"),
         halt_store=halt_store or HaltStore(tmp_path / "halt.json"),
         audit=AuditLog(tmp_path / "audit.jsonl"),
@@ -63,6 +65,17 @@ def test_shadow_cycle_decides_but_places_no_orders(tmp_path):
     assert not report.halted and report.state == "idle"
     assert len(report.opened) == 3
     assert broker._orders == {}
+
+
+def test_wired_bearish_scorer_blocks_a_long_entry(tmp_path):
+    """Regression guard: a real scorer (e.g. NewsSentimentScorer) passed as
+    Orchestrator(scorer=...) must actually reach SentimentGate and be able to
+    block a trade -- this was unreachable with the prior scorer=None default
+    (see src/strategy/news_sentiment_scorer.py)."""
+    broker = FakeBroker()
+    report = make_orch(broker, tmp_path, execute=False, scorer=lambda s: -1).run_cycle()
+    assert not report.halted and report.state == "idle"
+    assert report.opened == []
 
 
 def test_execute_cycle_opens_protected_positions_and_persists(tmp_path):
@@ -95,8 +108,7 @@ def test_reconcile_mismatch_halts(tmp_path):
 
 
 def test_kill_switch_halts_and_flattens(tmp_path):
-    acct = AccountView(equity=45000, last_equity=50000, buying_power=200000,
-                       daytrade_count=0, pattern_day_trader=False)
+    acct = AccountView(equity=45000, last_equity=50000, buying_power=200000)
     broker = FakeBroker(account=acct, auto_fill=False)
     broker.seed_order(OrderView(id="x1", client_order_id="c", symbol="AAPL", qty=1,
                                 side="sell", type="stop", status="accepted", stop_price=90.0))
@@ -187,6 +199,59 @@ def test_opposite_ema_exit_closes_position(tmp_path):
     assert not report.halted
     assert ("AAPL", "opposite_ema_break") in report.exited
     assert broker.closed == ["AAPL"]
+
+
+def _seed_open_position_with_stop(tmp_path, execute: bool):
+    """AAPL is genuinely OPEN at the broker with a resting stop -- reconcile
+    passes clean, no auto-close, no opposite-EMA exit (approve_frame's
+    close=105 > ema50=100)."""
+    broker = FakeBroker(positions=[PositionView("AAPL", 50, Side.LONG, 100.0)], auto_fill=False)
+    now = datetime.now(timezone.utc)
+    broker.seed_order(OrderView(
+        id="s1", client_order_id="c", symbol="AAPL", qty=50, side="sell",
+        type="stop", status="held", stop_price=90.0, expires_at=now + timedelta(days=10),
+    ))
+    orch = Orchestrator(
+        broker=broker, feature_provider=approve_frame, execute=execute,
+        state_store=StateStore(tmp_path / "p.json"),
+        halt_store=HaltStore(tmp_path / "h.json"), audit=AuditLog(tmp_path / "a.jsonl"),
+        scoreboard=Scoreboard(tmp_path / "sb.json"),
+    )
+    orch.positions = {
+        "AAPL": ManagedPosition(
+            symbol="AAPL", side=Side.LONG, qty=50, strategy="trend_following",
+            entry_order_id="e1", stop_order_id="s1", current_stop=90.0,
+            ratchet=PercentRatchet(entry=100.0, side=Side.LONG, initial_stop_pct=10.0),
+            status=PositionStatus.OPEN, filled_qty=50,
+        )
+    }
+    return broker, orch
+
+
+def test_refresh_stale_stop_resets_gtc_clock_when_near_expiry(tmp_path):
+    """10 days from Alpaca's 90-day GTC aged-order cancel, inside the default
+    15-day margin -- the cycle proactively replaces the stop at its OWN
+    price, which resets the clock without changing protection."""
+    broker, orch = _seed_open_position_with_stop(tmp_path, execute=True)
+
+    report = orch.run_cycle()
+
+    assert not report.halted
+    assert report.stops_refreshed == ["AAPL"]
+    assert broker.replaced and broker.replaced[-1] == ("s1", pytest.approx(90.0))
+    assert orch.positions["AAPL"].current_stop == pytest.approx(90.0)  # unchanged level
+
+
+def test_refresh_stale_stop_skipped_in_shadow_mode(tmp_path):
+    """Shadow/propose mode places nothing -- a near-expiry stop is left for
+    the next execute-mode cycle to catch, same posture as raise_stop."""
+    broker, orch = _seed_open_position_with_stop(tmp_path, execute=False)
+
+    report = orch.run_cycle()
+
+    assert not report.halted
+    assert report.stops_refreshed == []
+    assert broker.replaced == []
 
 
 def _seed_auto_closed_position(tmp_path, stop_order: OrderView, notifier):

@@ -4,18 +4,16 @@ side-aware reconciliation, and the ops snapshot."""
 
 from __future__ import annotations
 
-import json
-
 import pandas as pd
 
 from src.common.jsonio import atomic_write_json, load_json_or_quarantine
 from src.common.logging import AuditLog
 from src.common.models import Side
+from src.core import portfolio_view
 from src.core.orchestrator import Orchestrator
 from src.core.proposals import Proposal, ProposalStore
 from src.core.state_store import HaltStore, StateStore
 from src.core.trade_service import TradeService
-from src.core import portfolio_view
 from src.data.ingest import last_bar_age_days
 from src.execution.broker_alpaca import OrderView, PositionView
 from src.execution.order_manager import ManagedPosition, PositionStatus
@@ -23,8 +21,7 @@ from src.execution.reconciler import Reconciler
 from src.research.scoreboard import Scoreboard
 from src.risk.ratchet_stop import PercentRatchet
 from tests.unit.fakes import FakeBroker
-from tests.unit.synth import make_features
-
+from tests.unit.synth import make_features, small_universe_config
 
 # --- crash-safe JSON ---------------------------------------------------------
 
@@ -67,6 +64,7 @@ def _service(broker, tmp_path):
         state_store=StateStore(tmp_path / "positions.json"),
         halt_store=HaltStore(tmp_path / "halt.json"),
         price_fn=lambda s: 100.0,
+        audit=AuditLog(tmp_path / "audit.jsonl"),
     )
 
 
@@ -116,6 +114,7 @@ def test_last_bar_age_days():
 
 def _orch(broker, tmp_path, provider, **kw):
     kw.setdefault("execute", False)
+    kw.setdefault("config", small_universe_config())
     return Orchestrator(
         broker=broker, feature_provider=provider,
         state_store=StateStore(tmp_path / "positions.json"),

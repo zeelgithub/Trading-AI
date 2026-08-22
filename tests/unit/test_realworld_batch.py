@@ -7,7 +7,6 @@ from __future__ import annotations
 import threading
 import time
 
-import pandas as pd
 import pytest
 
 from src.common.config_schema import ConfigError, validate_config
@@ -19,14 +18,18 @@ from src.core.self_heal import SelfHealer
 from src.core.state_store import HaltClass, HaltStore, StateStore
 from src.core.trade_service import TradeService
 from src.execution.broker_alpaca import OrderView
-from src.execution.order_manager import ManagedPosition, OrderManager, PositionStatus, is_dead_entry
+from src.execution.order_manager import (
+    ManagedPosition,
+    OrderManager,
+    PositionStatus,
+    is_dead_entry,
+)
 from src.research.backtester import Backtester
 from src.research.scoreboard import Scoreboard
 from src.risk.ratchet_stop import PercentRatchet
 from tests.unit.fakes import FakeBroker
 from tests.unit.synth import make_features
 from tests.unit.test_order_manager import make_decision, make_ratchet
-
 
 # --- config validation --------------------------------------------------
 
@@ -84,6 +87,68 @@ def test_real_config_files_are_valid():
     load_config()  # must not raise -- the shipped YAML must pass its own schema
 
 
+# --- strategies.yaml / symbols.yaml (added alongside risk_limits/settings) ---
+# Existing two-arg calls above (e.g. test_valid_config_passes) confirm
+# strategies/symbols default to None and are simply skipped -- kept working
+# unchanged when this pair was added.
+
+def test_bad_regime_filter_threshold_is_rejected():
+    bad_strategies = {"regime_filter": {"trending_adx_min": -5}}
+    with pytest.raises(ConfigError, match="trending_adx_min"):
+        validate_config(GOOD_SETTINGS, GOOD_RISK, bad_strategies, None)
+
+
+def test_bad_confirmation_candle_ratio_is_rejected():
+    bad_strategies = {"confirmation_candle": {"min_body_ratio": 1.5}}  # must be <= 1
+    with pytest.raises(ConfigError, match="min_body_ratio"):
+        validate_config(GOOD_SETTINGS, GOOD_RISK, bad_strategies, None)
+
+
+def test_strategy_block_wrong_type_is_rejected():
+    bad_strategies = {"strategies": {"trend_following": {"enabled": "sure"}}}
+    with pytest.raises(ConfigError, match="trend_following"):
+        validate_config(GOOD_SETTINGS, GOOD_RISK, bad_strategies, None)
+
+
+def test_symbols_blank_symbol_is_rejected():
+    bad_symbols = {"watchlist": [{"symbol": "  ", "enabled": True}]}
+    with pytest.raises(ConfigError, match="watchlist"):
+        validate_config(GOOD_SETTINGS, GOOD_RISK, None, bad_symbols)
+
+
+def test_symbols_bad_override_is_rejected():
+    bad_symbols = {"watchlist": [
+        {"symbol": "AAPL", "overrides": {"max_position_pct": 150.0}},  # > 100
+    ]}
+    with pytest.raises(ConfigError, match="max_position_pct"):
+        validate_config(GOOD_SETTINGS, GOOD_RISK, None, bad_symbols)
+
+
+def test_strategy_flat_confidence_out_of_range_is_rejected():
+    bad_strategies = {"strategies": {"breakout": {"confidence": 1.5}}}  # > 1.0
+    with pytest.raises(ConfigError, match="confidence"):
+        validate_config(GOOD_SETTINGS, GOOD_RISK, bad_strategies, None)
+
+
+def test_strategy_trend_confidence_dict_out_of_range_is_rejected():
+    bad_strategies = {"strategies": {
+        "trend_following": {"confidence": {"base": 1.5}},  # > 1.0
+    }}
+    with pytest.raises(ConfigError, match="confidence"):
+        validate_config(GOOD_SETTINGS, GOOD_RISK, bad_strategies, None)
+
+
+def test_bad_atr_slope_lookback_is_rejected():
+    bad_strategies = {"regime_filter": {"atr_slope_lookback": 0}}  # must be > 0
+    with pytest.raises(ConfigError, match="atr_slope_lookback"):
+        validate_config(GOOD_SETTINGS, GOOD_RISK, bad_strategies, None)
+
+
+def test_symbols_unknown_keys_allowed_forward_compatible():
+    symbols = {"watchlist": [{"symbol": "AAPL", "future_key": True}]}
+    validate_config(GOOD_SETTINGS, GOOD_RISK, None, symbols)  # must not raise
+
+
 # --- cross-process locking ------------------------------------------------
 
 def test_bot_lock_serializes_and_times_out(tmp_path):
@@ -99,14 +164,14 @@ def test_bot_lock_serializes_and_times_out(tmp_path):
     t = threading.Thread(target=holder)
     t.start()
     time.sleep(0.1)
-    with pytest.raises(BotBusy):
-        with bot_lock(timeout=0.1, path=lockfile):
-            order.append("should not happen")
+    with pytest.raises(BotBusy), bot_lock(timeout=0.1, path=lockfile):
+        order.append("should not happen")
     t.join()
     assert order == ["enter", "exit"]
 
 
 def _service(broker, tmp_path, **kw):
+    kw.setdefault("audit", AuditLog(tmp_path / "audit.jsonl"))
     return TradeService(
         broker=broker,
         state_store=StateStore(tmp_path / "positions.json"),

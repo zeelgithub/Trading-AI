@@ -1,5 +1,20 @@
 # Explicit, user-specified universe. No broad scanner in v1.
-# Per-symbol overrides win over the defaults in risk_limits.yaml / strategies.yaml.
+# Per-symbol overrides win over risk_limits.yaml's global default.
+# Currently implemented: overrides.max_position_pct (RiskManager._max_position_pct).
+#
+# Widened 2026-08-22 from the original 3-symbol starter set (AAPL/MSFT/SPY)
+# to the still-listed 27 names of settings.yaml -> research.backtest_universe
+# -- the SAME liquid, sector-diverse large-cap basket trend_following was
+# actually backtest-validated against (PF 3.64, p=0.037), not a new,
+# unvalidated pick. This is deliberately about SAMPLE SIZE, not stock
+# selection: 3 live symbols produce too few trades to tell a real edge from
+# noise (the evaluation pipeline's own min_trades=30 bar needs real volume to
+# clear). Excludes that universe's delisted names (SIVB/FRC/SBNY/RAD/YELL/
+# PRTY) -- kept there deliberately to correct backtest survivorship bias, but
+# untradeable today. Portfolio-level exposure is still bounded independently
+# of how many symbols are here (risk_limits.yaml: max_open_positions: 10,
+# max_open_risk_pct: 4.0) -- widening this list gives the strategy more
+# chances to find its setup, it does not raise the aggregate risk ceiling.
 
 watchlist:
   - symbol: AAPL
@@ -7,13 +22,105 @@ watchlist:
     allow_short: false
     # overrides:
     #   max_position_pct: 8.0
-    #   ratchet_stop.trend_following.initial_stop_pct: 8.0
 
   - symbol: MSFT
     enabled: true
     allow_short: false
 
   - symbol: SPY
+    enabled: true
+    allow_short: false
+
+  # -- widened set below, mirrors settings.yaml's backtest_universe grouping --
+
+  # Tech / mega-cap growth
+  - symbol: GOOGL
+    enabled: true
+    allow_short: false
+  - symbol: AMZN
+    enabled: true
+    allow_short: false
+  - symbol: NVDA
+    enabled: true
+    allow_short: false
+  - symbol: META
+    enabled: true
+    allow_short: false
+  - symbol: TSLA
+    enabled: true
+    allow_short: false
+
+  # Semis
+  - symbol: INTC
+    enabled: true
+    allow_short: false
+  - symbol: AMD
+    enabled: true
+    allow_short: false
+
+  # Financials
+  - symbol: JPM
+    enabled: true
+    allow_short: false
+  - symbol: BAC
+    enabled: true
+    allow_short: false
+  - symbol: WFC
+    enabled: true
+    allow_short: false
+  - symbol: GS
+    enabled: true
+    allow_short: false
+
+  # Healthcare
+  - symbol: JNJ
+    enabled: true
+    allow_short: false
+  - symbol: UNH
+    enabled: true
+    allow_short: false
+  - symbol: PFE
+    enabled: true
+    allow_short: false
+
+  # Energy
+  - symbol: XOM
+    enabled: true
+    allow_short: false
+  - symbol: CVX
+    enabled: true
+    allow_short: false
+
+  # Consumer / retail / media
+  - symbol: HD
+    enabled: true
+    allow_short: false
+  - symbol: WMT
+    enabled: true
+    allow_short: false
+  - symbol: DIS
+    enabled: true
+    allow_short: false
+  - symbol: MCD
+    enabled: true
+    allow_short: false
+
+  # Industrials
+  - symbol: BA
+    enabled: true
+    allow_short: false
+  - symbol: CAT
+    enabled: true
+    allow_short: false
+  - symbol: GE
+    enabled: true
+    allow_short: false
+
+  # Staples
+  - symbol: KO
+    enabled: true
+    allow_short: false
+  - symbol: PEP
     enabled: true
     allow_short: false
 
