@@ -41,6 +41,7 @@ from src.core.proposals import ProposalStore
 from src.core.rotation import RotationService
 from src.core.symbols import SymbolResolver
 from src.core.trade_service import TradeService
+from src.data.providers.news import AlpacaNews
 from src.data.queries import indicator_snapshot
 from src.discovery.builder import build_discovery_pipeline
 from src.discovery.ledger import DiscoveryLedger
@@ -51,6 +52,7 @@ from src.execution.broker_alpaca import build_broker
 from src.notify.briefs import strategy_review_brief, symbol_brief
 from src.notify.digest import idea_text, ideas_header, source_summary
 from src.notify.telegram import TelegramClient, build_notifier
+from src.strategy.news_sentiment_scorer import NewsSentimentScorer
 
 log = get_logger("telegram")
 
@@ -111,6 +113,11 @@ class Listener:
         self.service = TradeService(
             broker=self.broker, config=self.config,
             symbol_resolver=SymbolResolver(self.broker, aliases=_COMPANY_TO_TICKER))
+        # Same live scorer scripts/run_paper.py wires into its own Orchestrator
+        # -- /run (below) builds one too, and the two must not silently diverge
+        # in what SentimentGate sees for an on-demand vs. scheduled cycle.
+        news_days = int(self.config.get("strategies.sentiment_gate.news_scorer_lookback_days", 3))
+        self.scorer = NewsSentimentScorer(AlpacaNews(), days=news_days)
         self.proposals = ProposalStore()
         self._whisper_model = None  # lazy-loaded on first voice message
         # Smart NL parsing via the nl_router agent; the local regex (_parse_nl)
@@ -617,7 +624,7 @@ class Listener:
     def _run_cycle(self, chat_id) -> None:
         self._send(chat_id, "Running a decision cycle...")
         orch = Orchestrator(broker=self.broker, config=self.config, propose=True,
-                            notifier=build_notifier(self.config))
+                            notifier=build_notifier(self.config), scorer=self.scorer)
         report = orch.run_cycle()
         if report.halted:
             self._send(chat_id, f"🛑 HALTED: {report.halt_reason}")
