@@ -21,8 +21,10 @@ import argparse
 from src.common.config import load_config
 from src.core.orchestrator import Orchestrator
 from src.core.proposals import ProposalStore
-from src.execution.broker_alpaca import AlpacaBroker
+from src.data.providers.news import AlpacaNews
+from src.execution.broker_alpaca import build_broker
 from src.notify.telegram import build_notifier
+from src.strategy.news_sentiment_scorer import NewsSentimentScorer
 
 
 def main() -> None:
@@ -41,13 +43,22 @@ def main() -> None:
     propose = args.propose or (args.execute and require_approval)
     execute = args.execute and not propose
 
+    # Real sentiment scorer (2026-08-22): recent headline tone, same free
+    # Alpaca news feed + deterministic lexicon discovery's NewsSource uses.
+    # SentimentGate.apply() already isolates a raised exception as
+    # on_feed_unavailable=skip_gate, so a feed outage here degrades to the
+    # prior scorer=None behavior for that cycle, not a halt.
+    news_days = int(config.get("strategies.sentiment_gate.news_scorer_lookback_days", 3))
+    scorer = NewsSentimentScorer(AlpacaNews(), days=news_days)
+
     orch = Orchestrator(
-        broker=AlpacaBroker(),
+        broker=build_broker(config, allow_live=args.allow_live),
         config=config,
         execute=execute,
         propose=propose,
         allow_live=args.allow_live,
         notifier=notifier,
+        scorer=scorer,
     )
 
     if args.reset:

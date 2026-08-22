@@ -6,6 +6,9 @@ This is intentionally shallow (a free, no-LLM lexicon count, not NLP): it is a
 confluence signal -- "the tape is talking positively about this name" -- not a
 standalone thesis. It only contributes when recent coverage is net positive
 (discovery suggests longs only), so negative news simply withholds a boost.
+Tone scoring itself (the lexicon) lives in src/data/news_sentiment.py, shared
+with the live SentimentGate scorer (src/strategy/news_sentiment_scorer.py) so
+the two never drift into scoring the same headline differently.
 
 Honest limitation: a lexicon can be fooled by sarcasm / context. Good enough to
 nudge ranking, never to carry a trade on its own.
@@ -17,21 +20,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from src.data.news_sentiment import headline_tone
 from src.data.providers.news import NewsProvider
 from src.discovery.candidate import SignalContribution
-
-_POSITIVE = {
-    "beat", "beats", "surge", "surges", "upgrade", "upgraded", "record", "growth",
-    "rally", "rallies", "jump", "jumps", "soar", "soars", "outperform", "raises",
-    "raised", "tops", "strong", "bullish", "partnership", "wins", "win", "approval",
-    "approved", "expansion", "buyback", "profit", "gains", "gain", "high", "boost",
-}
-_NEGATIVE = {
-    "miss", "misses", "plunge", "plunges", "downgrade", "downgraded", "lawsuit",
-    "probe", "cut", "cuts", "falls", "fall", "drop", "drops", "weak", "bearish",
-    "recall", "fraud", "investigation", "warns", "warning", "slump", "layoffs",
-    "loss", "losses", "decline", "sinks", "halts", "delay", "delays", "bankruptcy",
-}
 
 
 @dataclass
@@ -59,7 +50,7 @@ def _score_symbol(symbol, headlines, source_name, days) -> SignalContribution | 
     pos = neg = 0
     example = ""
     for h in headlines:
-        tone = _tone(f"{h.headline} {h.summary}")
+        tone = headline_tone(f"{h.headline} {h.summary}")
         if tone > 0:
             pos += 1
             example = example or h.headline
@@ -77,11 +68,6 @@ def _score_symbol(symbol, headlines, source_name, days) -> SignalContribution | 
         reason += f" (e.g. “{_clip(example)}”)"
     return SignalContribution(symbol=symbol, source=source_name, score=score, reason=reason,
                               meta={"positive": pos, "negative": neg})
-
-
-def _tone(text: str) -> int:
-    words = {w.strip(".,!?:;\"'()").lower() for w in text.split()}
-    return len(words & _POSITIVE) - len(words & _NEGATIVE)
 
 
 def _clip(text: str, n: int = 60) -> str:
