@@ -2,11 +2,6 @@
 
 mode: paper                # paper | live  (live is a deliberate manual change)
 
-market:
-  timezone: America/New_York
-  session: regular         # regular | extended
-  calendar: us_equities
-
 data:
   timeframe: 1Day          # primary bar interval for all strategies (swing)
   feed: iex                # iex | sip  (sip = full volume, paid)
@@ -17,22 +12,13 @@ data:
   # 4 days tolerates a weekend + one holiday.
   max_bar_age_days: 4
 
-universe:
-  source: config/symbols.yaml   # explicit, user-specified watchlist (no scanner in v1)
-
 scheduling:
   # Daily/swing system: evaluate once near the close, act at next open.
   # Reconciliation runs at the START of every cycle (not on its own timer).
   evaluate_at: "15:45"     # ET, just before close
 
-logging:
-  level: INFO
-  audit_log: logs/audit.jsonl     # append-only decision + order trail
-  trade_log: logs/trades.jsonl
-
 alerts:
   enabled: true
-  channel: telegram               # telegram | none  (token + chat ids in .env)
   # NOTE: named `events`, not `on` -- YAML 1.1 parses a bare `on:` key as the
   # boolean True (same footgun as on/off/yes/no), which silently broke this
   # filter (config.get("...alerts.on") always missed, so every event type
@@ -84,6 +70,14 @@ backtest:
   # Cost assumptions for src/research/backtester.py. Alpaca is commission-free
   # for US equities; slippage is a conservative fill-cost assumption so
   # backtests don't systematically look better than live/paper trading will.
+  # Researched 2026-08-21: no well-matched benchmark found to justify a
+  # specific different number -- institutional execution-slippage data
+  # (~14-15bps) exists but measures much larger, market-moving orders against
+  # arrival mid-price, not a retail few-share market order in a liquid
+  # large-cap, so it isn't a fair comparison either direction. Once a
+  # strategy has real fills, compare actual entry slippage (last quote before
+  # submission vs. filled_avg_price -- broker_alpaca.py already reports the
+  # latter) against this assumption instead of guessing further.
   commission_per_share: 0.0
   slippage_bps: 5.0
 
@@ -94,6 +88,18 @@ approval:
   require_approval: true
   proposal_expiry_minutes: 1080   # 18h -- a proposal made near the close expires
                                   # before the next session if left untouched
+
+execution:
+  # Alpaca auto-cancels a GTC order 90 days after creation/last-modification
+  # (docs.alpaca.markets/us/docs/orders-at-alpaca -- confirmed against the
+  # installed alpaca-py SDK's Order.expires_at field). raise_stop only
+  # replaces the resting stop when the ratchet actually advances, so a flat
+  # or losing position's stop can sit unmodified indefinitely on this
+  # daily-swing system (positions held weeks/months, docs/STRATEGIES.md).
+  # Each cycle, any resting stop within this many days of expiring gets a
+  # same-price replace -- identical protection level, resets Alpaca's clock,
+  # no new process or polling-cadence change.
+  stop_refresh_min_days_remaining: 15
 
 research:
   # Validation universe for scripts/evaluate_strategies.py -- DISTINCT from
@@ -131,17 +137,29 @@ discovery:
   # sources, score them deterministically, and push the top N to the phone as
   # Approve/Deny suggestions. Discovery NEVER places an order itself -- it only
   # proposes through the same risk gate as everything else (you approve).
-  enabled: true
+  # No top-level on/off switch -- control is per-source below (discovery.sources).
   top_n: 4                 # how many ranked ideas to surface per run
   min_score: 25            # 0-100 confidence floor; below this we don't suggest
   sources:                 # which signal sources are live (phased rollout)
-    congress: true         # Phase A -- CapitolTrades disclosures (free, scraped)
+    congress: false        # Phase A -- congressional disclosures. OFF by default:
+                           # no ingestion ships in this repo (congress_copy/README.md
+                           # "Scheduled ingestion" -- bring your own), so leaving this
+                           # on would just re-surface the same frozen sample rows as
+                           # if they were fresh ideas. Turn on once real ingestion
+                           # writes to congress_copy/data/disclosures.json.
     technical: true        # Phase A -- the 3 built strategies + regime filter
-    news: false            # Phase B -- Alpaca free news/sentiment
-    fundamentals: false    # Phase C -- yfinance quality filter
+    news: true              # Phase B -- Alpaca free news/sentiment. Enabled 2026-08-22:
+                            # AlpacaNews reuses the existing market-data credentials, no
+                            # new setup needed; keyword-lexicon scoring, read-only.
+    fundamentals: true      # Phase C -- yfinance quality filter. Enabled 2026-08-22:
+                            # yfinance was a declared-but-not-installed optional dependency
+                            # (requirements.txt) -- installed (1.6.0) as part of turning
+                            # this on. Both sources fail soft per-symbol (try/except in
+                            # gather()), so a transient yfinance/Alpaca-news hiccup skips
+                            # that name rather than crashing the discovery cycle.
   weights:                 # relative blend weights (renormalised over the
                            # sources that are switched on); confluence scores higher
-    congress: 0.60         # lead signal -- congress drives the ranking
+    congress: 0.60         # lead signal once ingestion exists and this is turned on
     technical: 0.35
     news: 0.15
     fundamentals: 0.15
@@ -154,4 +172,21 @@ discovery:
     lookback_days: 7       # how far back to read headlines for sentiment
   universe:
     # Extra tickers to technically screen beyond the watchlist + congress names.
-    extra: [NVDA, AMD, GOOGL, AMZN, META, JPM, MS, COF, ISRG, PLTR]
+    # Broadened 2026-08-22 (10 -> 31 names) by merging with the still-listed
+    # portion of research.backtest_universe below -- same liquid, sector-diverse
+    # large-cap selection already vetted for that purpose (tech, financials,
+    # healthcare, energy, industrials, staples, media), not a fresh hand-pick.
+    # No live full-market scanner: Alpaca's asset catalog (list_assets) has no
+    # volume/liquidity field, so ranking "most liquid" would mean fetching bars
+    # for the entire ~11k-symbol tradable universe every cycle -- expensive and
+    # not something to bolt on without dedicated design. This is a genuinely
+    # wider net, not a claim of full-market coverage.
+    extra: [AAPL, MSFT, GOOGL, AMZN, NVDA, META, TSLA,
+            JPM, BAC, WFC, GS, MS, COF,
+            JNJ, UNH, PFE, ISRG,
+            XOM, CVX,
+            HD, WMT, DIS, MCD,
+            BA, CAT, GE,
+            KO, PEP,
+            INTC, AMD,
+            PLTR]

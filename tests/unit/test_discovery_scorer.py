@@ -47,8 +47,11 @@ def test_from_config_reads_enabled_sources():
     from src.common.config import load_config
 
     scorer = Scorer.from_config(load_config())
-    # Phase A default: congress + technical on, news + fundamentals off.
-    assert scorer.active_sources == frozenset({"congress", "technical"})
+    # technical/news/fundamentals on (news/fundamentals enabled 2026-08-22 --
+    # both fail soft per-symbol, no new credentials needed); congress stays
+    # off (no ingestion ships in this repo -- see congress_copy/README.md
+    # "Scheduled ingestion").
+    assert scorer.active_sources == frozenset({"technical", "news", "fundamentals"})
 
 
 def test_stars_track_score():
