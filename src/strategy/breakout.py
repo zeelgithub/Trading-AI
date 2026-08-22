@@ -14,7 +14,12 @@ from __future__ import annotations
 import pandas as pd
 
 from src.common.models import Action, Intent, Side
-from src.strategy.base import Strategy, bearish_confirmation, bullish_confirmation, has_nan
+from src.strategy.base import (
+    Strategy,
+    bearish_confirmation,
+    bullish_confirmation,
+    has_nan,
+)
 
 _REQUIRED = ["atr", "vol_sma"]
 
@@ -61,7 +66,7 @@ class Breakout(Strategy):
             strategy=self.name,
             side=side,
             action=Action.BUY if side == Side.LONG else Action.SHORT,
-            confidence=0.65,
+            confidence=float(self.params.get("confidence", 0.65)),
             entry_price=round(entry, 2),
             stop_loss=round(self.initial_stop(side, entry, atr=atr), 2),
             take_profit=None,  # rides the ATR ratchet

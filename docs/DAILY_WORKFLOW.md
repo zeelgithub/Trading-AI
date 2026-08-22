@@ -26,8 +26,10 @@ agent in the loop.
 
 Keep two things running:
 
-- **Telegram listener (always-on):** `python -m scripts.run_telegram`
-  (Windows task: "at logon, restart on failure").
+- **Telegram listener (always-on):** `python -m scripts.run_telegram`,
+  supervised to restart on failure — Windows Task Scheduler or a systemd
+  service; see the README's "Running continuously" for both, with copy-paste
+  examples.
 - **Daily decision cycle (scheduled ~15:45 ET, weekdays):**
   `python -m scripts.run_paper --execute` — with `approval.require_approval: true`
   (default) this becomes *propose-and-approve*: it pushes trade proposals to your
@@ -65,8 +67,10 @@ star rating, the reasons it surfaced (e.g. *Congress: Rep. X bought $1k–15k, f
 9d ago* · *Technical: trend_following setup*), a suggested size + stop, and
 Approve/Deny buttons. New tickers you don't own can appear here — that's the
 discovery layer. Optionally `/brief SYM` one first, then Approve the ones you like.
-- `/sources` shows what each signal source is contributing over time (the basis
-  for reweighting in `config/settings.yaml` → `discovery.weights`).
+- `/sources` shows what each signal source is contributing over time. `/reweight`
+  turns that into a concrete suggestion — a bounded, ledger-driven reweighting of
+  `discovery.weights` — and pushes it Approve/Deny, same as a rotation proposal;
+  it never applies without a tap.
 
 ### 4. Place a manual trade (any time)
 - `/brief AAPL` → paste into Claude.ai → if it looks good:
@@ -121,6 +125,7 @@ If you get a **🛑 INCIDENT** brief (or run `run_self_heal`):
 | `/status` · `/positions` | equity, positions, stops, halt state |
 | `/ideas` | discover & rank fresh buy ideas → Approve/Deny each |
 | `/sources` | what each discovery signal is contributing |
+| `/reweight` | suggest a bounded reweighting of discovery sources → Approve/Deny |
 | `/brief SYM` | symbol brief → paste into Claude.ai |
 | `/review` | strategy brief → paste into Claude.ai |
 | `/strategies` | scoreboard (verdicts + live P&L) |

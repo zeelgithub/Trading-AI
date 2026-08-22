@@ -13,7 +13,8 @@ Boundary: pure functions over closed trades; places orders NO.
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Any, Iterable
+from collections.abc import Iterable
+from typing import Any
 
 # A "trade" here is any object exposing .strategy, .pnl, .return_pct, .exit_date
 # (e.g. research.backtester.Trade). We stay duck-typed so tests can pass stubs.

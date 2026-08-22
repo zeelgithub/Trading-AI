@@ -42,7 +42,6 @@ def main() -> None:
         equity=account_raw.equity,
         last_equity=account_raw.last_equity,
         buying_power=account_raw.buying_power,
-        daytrade_count=getattr(account_raw, "daytrade_count", None),
     )
     positions = StateStore().load()
 

@@ -8,6 +8,33 @@ on:
 
 jobs:
   test:
+    # Two OSes because this bot is genuinely deployed on both (README documents
+    # Windows Task Scheduler and Linux systemd/cron setups); three Python
+    # versions to cover requirements.txt's stated "3.11+" floor plus the two
+    # newest minors.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.11", "3.12", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests (offline, no creds required)
+        run: pytest -q
+
+  lint:
+    # Single OS/version: static analysis output doesn't depend on the runtime
+    # matrix above, so running it once keeps CI minutes down.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -20,14 +47,19 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run tests (offline, no creds required)
-        run: pytest -q
-
-      # Lint/type-check are informational for now (136 ruff / 30 mypy findings
-      # pre-date this workflow, mostly import-order and Optional/list-variance
-      # issues) -- they run so drift is visible in every PR, but don't block
-      # merges until a dedicated cleanup pass lands. Tighten with
-      # `continue-on-error: false` once that pass is done.
+      # Lint/type-check are informational for now. A mechanical cleanup pass
+      # (2026-08-22, `ruff check . --fix`) took ruff from 136 to 73 findings --
+      # everything safely auto-fixable (import order/modernization, unused
+      # imports, quoted annotations) is done. What's left needs a human call,
+      # not a bulk fix: 47 of the 73 are BLE001 (blind `except Exception`),
+      # and many of those are the bot's own "default to halt on ANY
+      # exception" safety philosophy (CLAUDE.md rule 3) working as intended --
+      # narrowing them without per-site review risks breaking that, not just
+      # cleaning it up. mypy's 37 findings are mostly list-invariance (pass a
+      # `list[X]` where `Sequence[X]` was wanted) needing the same kind of
+      # per-site read. Both run so drift is visible in every PR, but don't
+      # block merges until that review lands. Tighten with
+      # `continue-on-error: false` once it does.
       - name: Lint (ruff, informational)
         if: always()
         continue-on-error: true

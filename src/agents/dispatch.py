@@ -14,8 +14,8 @@ Boundary: routes only; places orders NO.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 from src.agents.model import ModelClient
 from src.agents.profiles import AgentProfile

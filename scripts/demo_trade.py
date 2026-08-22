@@ -43,14 +43,14 @@ def main() -> None:
         take_profit=None, suggested_qty=float(requested),
     )
 
-    print(f"=== 1. Trade signal (Intent) ===")
+    print("=== 1. Trade signal (Intent) ===")
     print("   " + str(intent.to_dict()))
 
-    print(f"\n=== 2. Risk gatekeeper ===")
+    print("\n=== 2. Risk gatekeeper ===")
     account = AccountState(
         equity=acct.equity, start_of_day_equity=acct.last_equity,
         buying_power=acct.buying_power, last_price=price, open_positions=0,
-        gross_exposure_value=0.0, is_intraday=False, day_trade_count=acct.daytrade_count,
+        gross_exposure_value=0.0,
     )
     decision = RiskManager(config).evaluate(intent, account)
     risk_dollars = acct.equity * float(config.risk_limits["allocation"]["per_strategy_risk_pct"]) / 100
@@ -75,9 +75,9 @@ def main() -> None:
     if has_tp:
         print(f"   leg 3 TAKE-PROFIT: limit SELL {qty:g} {symbol} @ ${intent.take_profit:,.2f}")
     else:
-        print(f"   (no take-profit leg -- trend rides the ratchet stop)")
+        print("   (no take-profit leg -- trend rides the ratchet stop)")
 
-    print(f"\n=== 4. Ratchet stop as TSLA rises (never moves down) ===")
+    print("\n=== 4. Ratchet stop as TSLA rises (never moves down) ===")
     ratchet = build_ratchet(strategy, rp, price, Side.LONG)
     print(f"   entry ${price:,.2f}  ->  stop ${ratchet.stop:,.2f}")
     for pct in (10, 20, 40, 60):

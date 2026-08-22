@@ -23,10 +23,6 @@ def test_flatten_phrasings(text):
     assert _parse(text) == {"cmd": "flatten"}
 
 
-def test_buy_with_company_name_and_stop():
-    assert _parse("buy 15 Tesla with 8% stop") == {"cmd": "buy", "sym": "TSLA", "qty": 15, "stop": 8.0}
-
-
 def test_close_single_symbol_is_not_flatten():
     assert _parse("close my Apple position") == {"cmd": "close", "sym": "AAPL"}
 

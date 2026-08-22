@@ -11,7 +11,7 @@ Boundary: constructs read-only sources; the pipeline it returns places NO orders
 
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 from congress_copy.providers import JSONFileProvider
 from src.common.config import Config, load_config
@@ -19,7 +19,12 @@ from src.discovery.pipeline import DiscoveryPipeline, PriceFn
 from src.discovery.scorer import Scorer
 from src.discovery.sources.congress import CongressSource
 from src.discovery.sources.technical import TechnicalSource
-from src.discovery.universe import DEFAULT_DISCLOSURES, cached_feature_provider, discovery_universe
+from src.discovery.universe import (
+    DEFAULT_DISCLOSURES,
+    cached_feature_provider,
+    discovery_universe,
+)
+from src.discovery.weight_advisor import DiscoveryWeightStateStore
 from src.research.scoreboard import Scoreboard
 from src.risk.risk_manager import RiskManager
 
@@ -82,9 +87,16 @@ def build_discovery_pipeline(
             universe=discovery_universe(config),
         ))
 
+    # Approved reweighting (src/discovery/weight_advisor.py, applied via
+    # /reweight on the phone) overrides the static config default -- absent
+    # any approval, this is a no-op and the config weights win, same posture
+    # as strategy rotation's state-over-config layering.
+    scorer = Scorer.from_config(config)
+    scorer.weights.update(DiscoveryWeightStateStore().load().weights)
+
     return DiscoveryPipeline(
         sources=sources,
-        scorer=Scorer.from_config(config),
+        scorer=scorer,
         risk=RiskManager(config),
         config=config,
         price_fn=price_fn or _default_price_fn(),

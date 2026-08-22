@@ -46,7 +46,7 @@ class DisclosedTrade:
         return (self.disclosure_date - self.trade_date).days
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "DisclosedTrade":
+    def from_dict(cls, d: dict[str, Any]) -> DisclosedTrade:
         return cls(
             politician=d["politician"],
             ticker=d["ticker"].upper(),

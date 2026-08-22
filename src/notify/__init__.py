@@ -11,10 +11,10 @@ Boundary: places orders NO, holds trading credentials NO.
 """
 
 from src.notify.telegram import (
-    NullNotifier,
     Notifier,
+    NullNotifier,
     TelegramClient,
     build_notifier,
 )
 
-__all__ = ["TelegramClient", "Notifier", "NullNotifier", "build_notifier"]
+__all__ = ["Notifier", "NullNotifier", "TelegramClient", "build_notifier"]

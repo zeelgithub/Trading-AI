@@ -16,8 +16,8 @@ Boundary: places orders NO (emits Proposals only), holds trading credentials NO.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable
 
 from src.common.config import Config
 from src.common.logging import get_logger
@@ -42,7 +42,6 @@ class Account:
     equity: float
     last_equity: float
     buying_power: float
-    daytrade_count: int | None = None
 
 
 @dataclass
@@ -156,7 +155,6 @@ class DiscoveryPipeline:
             buying_power=account.buying_power, last_price=entry,
             open_positions=exposure.open_count, gross_exposure_value=exposure.gross_value,
             open_risk_dollars=exposure.open_risk_dollars,
-            is_intraday=False, day_trade_count=account.daytrade_count,
         )
         decision = self.risk.evaluate(intent, acct_state)
         if decision.decision == Decision.VETO or decision.approved_qty <= 0:

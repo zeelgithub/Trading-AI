@@ -11,7 +11,7 @@ Boundary: read-only reasoning; places orders NO.
 
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 from src.agents.catalog import ANOMALY_TRIAGE
 from src.agents.dispatch import AgentRequest, Dispatcher

@@ -6,7 +6,6 @@ import pytest
 
 from src.common.models import Action, Intent, Side
 
-
 VALID = {
     "symbol": "AAPL",
     "signal": "BUY",

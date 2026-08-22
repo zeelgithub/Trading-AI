@@ -35,7 +35,6 @@ def _load_config() -> CopyConfig:
         max_disclosure_age_days=int(d.get("max_disclosure_age_days", 60)),
         initial_stop_pct=float(d.get("initial_stop_pct", 10.0)),
         strategy_name=d.get("strategy_name", "congress_copy"),
-        execute=bool(d.get("execute", False)),
     )
 
 
@@ -68,8 +67,6 @@ def main() -> None:
         last_price=0.0,
         open_positions=len(positions),
         gross_exposure_value=sum(p.qty * p.avg_entry_price for p in positions),
-        is_intraday=False,
-        day_trade_count=acct.daytrade_count,
     )
 
     trader = CopyTrader(

@@ -5,8 +5,8 @@ from __future__ import annotations
 from src.common.config import load_config
 from src.common.secrets import NotificationCredentials
 from src.notify.telegram import (
-    NullNotifier,
     Notifier,
+    NullNotifier,
     TelegramClient,
     build_notifier,
 )

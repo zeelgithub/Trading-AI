@@ -109,7 +109,7 @@ def ingest_symbol(
     return IngestReport(symbol=symbol, rows=len(clean), written=written, gap_count=gaps)
 
 
-def drop_incomplete_bar(df: pd.DataFrame, now: "pd.Timestamp | None" = None) -> pd.DataFrame:
+def drop_incomplete_bar(df: pd.DataFrame, now: pd.Timestamp | None = None) -> pd.DataFrame:
     """Remove today's still-forming daily bar during the trading session.
 
     At 15:45 ET the newest 'daily' bar is partial: its close/high/low aren't

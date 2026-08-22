@@ -55,8 +55,16 @@ class BacktestResult:
 
 
 class _Position:
-    __slots__ = ("symbol", "side", "qty", "entry_price", "entry_date", "ratchet",
-                 "take_profit", "strategy")
+    __slots__ = (
+        "entry_date",
+        "entry_price",
+        "qty",
+        "ratchet",
+        "side",
+        "strategy",
+        "symbol",
+        "take_profit",
+    )
 
     def __init__(self, symbol, side, qty, entry_price, entry_date, ratchet, take_profit, strategy):
         self.symbol = symbol
@@ -199,7 +207,6 @@ class Backtester:
             open_positions=len(positions),
             gross_exposure_value=gross,
             open_risk_dollars=open_risk,
-            is_intraday=False,
         )
         decision = self.risk.evaluate(gated, acct)
         if decision.approved_qty <= 0:

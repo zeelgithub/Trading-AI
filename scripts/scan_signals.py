@@ -80,8 +80,6 @@ def main() -> None:
             last_price=last_price,
             open_positions=len(positions),
             gross_exposure_value=gross,
-            is_intraday=False,
-            day_trade_count=acct.daytrade_count,
         )
         decision = risk.evaluate(gated, account_state)
         print(line + f"-> {decision.decision.value.upper()} qty={decision.approved_qty:g}")

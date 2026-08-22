@@ -130,7 +130,7 @@ class Intent:
         }
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "Intent":
+    def from_dict(cls, d: dict[str, Any]) -> Intent:
         required = ("symbol", "signal", "strategy")
         missing = [k for k in required if k not in d]
         if missing:

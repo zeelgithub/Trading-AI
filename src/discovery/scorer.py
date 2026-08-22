@@ -35,7 +35,7 @@ class Scorer:
     active_sources: frozenset[str] = frozenset(SOURCES)
 
     @classmethod
-    def from_config(cls, config) -> "Scorer":
+    def from_config(cls, config) -> Scorer:
         weights = {**DEFAULT_WEIGHTS, **(config.get("settings.discovery.weights", {}) or {})}
         srcs = config.get("settings.discovery.sources", {}) or {}
         active = frozenset(s for s in SOURCES if srcs.get(s, False))

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from src.research.scoreboard import Scoreboard, StrategyScore, classify
 
-
 # --- classify (verdict thresholds) ---
 
 def test_classify_noise_too_few_trades():

@@ -5,6 +5,17 @@ Risk-based sizing: shares are chosen so that hitting the stop loses no more than
 `per_trade_risk_pct` of equity, then capped by the max-position limit and
 available buying power. Pure, deterministic, no I/O.
 
+Considered and rejected, 2026-08-21: Kelly-criterion sizing. Research on Kelly
+in practice is consistent that parameter estimation error dominates at low
+trade counts -- a +-5pp uncertainty in win rate (common under ~50-100 trades)
+can swing the "optimal" position size by 3x or more, which is why even
+professional funds that DO use Kelly run it at 1/4-1/2 strength rather than
+full. This project's best-validated strategy has 43 backtest trades and ZERO
+live fills (docs/ROADMAP.md Step 7 gate) -- far below the threshold where
+Kelly inputs mean anything. Fixed-fractional risk sizing isn't a placeholder
+for something more sophisticated; at this stage it's the better-supported
+choice. Revisit only once a strategy has a real, live trade-count history.
+
 Boundary: pure logic.
 """
 

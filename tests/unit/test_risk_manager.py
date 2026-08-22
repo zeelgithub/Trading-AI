@@ -5,8 +5,10 @@ Uses the real config/*.yaml (loads offline, no credentials needed).
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date
 
+from src.common.config import load_config
 from src.common.models import Decision, Intent, Side
 from src.risk.risk_manager import AccountState, RiskManager
 
@@ -19,7 +21,6 @@ def base_account(**over) -> AccountState:
         last_price=100.0,
         open_positions=0,
         gross_exposure_value=0.0,
-        is_intraday=False,
         as_of=date(2026, 6, 12),
     )
     defaults.update(over)
@@ -50,6 +51,34 @@ def test_full_confidence_sizes_by_max_position_cap():
     assert decision.decision in (Decision.APPROVE, Decision.RESIZE)
     # trend stop = entry * 0.9 = 90; max position 10% of 50k / 100 = 50 shares cap.
     assert decision.approved_qty == 50.0
+
+
+def test_per_symbol_max_position_override_shrinks_sizing():
+    # AAPL gets a tighter cap than the global default (10%); confidence=1.0 so
+    # the risk cap alone would allow far more than either max-position figure,
+    # isolating the override's effect the same way test_full_confidence_... does.
+    base = load_config()
+    symbols = {
+        **base.symbols,
+        "watchlist": [
+            {"symbol": "AAPL", "enabled": True, "allow_short": False,
+             "overrides": {"max_position_pct": 4.0}},
+            *[w for w in base.symbols["watchlist"] if w["symbol"] != "AAPL"],
+        ],
+    }
+    rm = RiskManager(replace(base, symbols=symbols))
+    intent = Intent(symbol="AAPL", strategy="trend_following", side=Side.LONG, confidence=1.0)
+    decision = rm.evaluate(intent, base_account())
+    assert decision.decision in (Decision.APPROVE, Decision.RESIZE)
+    # trend stop = entry * 0.9 = 90; overridden max position 4% of 50k / 100 = 20 shares.
+    assert decision.approved_qty == 20.0
+
+
+def test_symbol_without_override_uses_global_default():
+    rm = RiskManager()  # MSFT has no overrides block in config/symbols.yaml
+    intent = Intent(symbol="MSFT", strategy="trend_following", side=Side.LONG, confidence=1.0)
+    decision = rm.evaluate(intent, base_account())
+    assert decision.approved_qty == 50.0  # unchanged: global max_position_pct (10%)
 
 
 def test_kill_switch_vetoes_everything():

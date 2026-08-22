@@ -54,7 +54,7 @@ class Proposal:
         ratchet_params: dict | None = None,
         atr: float | None = None,
         expiry_minutes: int = 1080,
-    ) -> "Proposal":
+    ) -> Proposal:
         now = _utcnow()
         symbol = intent.get("symbol", "SYM")
         return cls(

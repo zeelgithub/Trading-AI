@@ -71,18 +71,21 @@ class Config:
 def load_config(config_dir: str | None = None) -> Config:
     """Load all config files once (cached). Pass config_dir to override.
 
-    Validates settings.yaml and risk_limits.yaml against config_schema before
-    returning: a misspelled key falling back to a silent default, or a
-    wrong-type/out-of-range value crashing deep inside RiskManager, both
-    become one clear ConfigError here instead -- before any trading logic runs.
+    Validates all four YAML files against config_schema before returning: a
+    misspelled key falling back to a silent default, or a wrong-type/
+    out-of-range value crashing deep inside RiskManager or the strategy layer,
+    both become one clear ConfigError here instead -- before any trading logic
+    runs.
     """
     base = Path(config_dir) if config_dir else CONFIG_DIR
     settings = _load_yaml(base / "settings.yaml")
     risk_limits = _load_yaml(base / "risk_limits.yaml")
-    validate_config(settings, risk_limits)
+    strategies = _load_yaml(base / "strategies.yaml")
+    symbols = _load_yaml(base / "symbols.yaml")
+    validate_config(settings, risk_limits, strategies, symbols)
     return Config(
         settings=settings,
         risk_limits=risk_limits,
-        strategies=_load_yaml(base / "strategies.yaml"),
-        symbols=_load_yaml(base / "symbols.yaml"),
+        strategies=strategies,
+        symbols=symbols,
     )

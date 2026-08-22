@@ -20,7 +20,7 @@ import argparse
 
 from src.common.config import load_config
 from src.core.trade_service import TradeService
-from src.execution.broker_alpaca import AlpacaBroker
+from src.execution.broker_alpaca import build_broker
 from src.notify.telegram import build_notifier
 
 
@@ -32,7 +32,9 @@ def main() -> None:
     args = parser.parse_args()
 
     config = load_config()
-    service = TradeService(broker=AlpacaBroker(), config=config)
+    # No allow_live here: manual_order stays paper-only, matching its docs
+    # ("risk-gated manual buy" -- no live-mode flag is documented for it).
+    service = TradeService(broker=build_broker(config), config=config)
     result = service.place_manual(args.symbol, args.qty, stop_pct=args.stop)
 
     print(result.message)

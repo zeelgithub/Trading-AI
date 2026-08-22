@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from src.common.models import Action, Decision, Intent, RiskDecision, Side
@@ -123,6 +126,65 @@ def test_raise_stop_replaces_leg():
     assert pos.current_stop == pytest.approx(110.0)
     assert broker.replaced and broker.replaced[-1][1] == pytest.approx(110.0)
     assert om.raise_stop(pos, 105.0) is False   # never lowers
+
+
+def test_refresh_stale_stop_false_when_not_yet_protected():
+    """Before settle() attaches a stop, there's nothing to refresh."""
+    broker = FakeBroker(auto_fill=False)
+    om = OrderManager(broker)
+    pos = om.open_position(make_decision(), make_ratchet(), tag="t1")
+
+    assert om.refresh_stale_stop(pos, now=datetime.now(timezone.utc)) is False
+    assert broker.replaced == []
+
+
+def test_refresh_stale_stop_false_when_broker_reports_no_expiry():
+    """FakeBroker's stop orders default to expires_at=None (mirrors a broker
+    response that doesn't carry the field) -- nothing to compare, so no-op
+    rather than guessing."""
+    broker = FakeBroker()
+    om = OrderManager(broker)
+    pos = om.open_position(make_decision(), make_ratchet(), tag="t1")
+    om.settle(pos)
+
+    assert om.refresh_stale_stop(pos, now=datetime.now(timezone.utc)) is False
+    assert broker.replaced == []
+
+
+def _set_stop_expiry(broker: FakeBroker, pos, expires_at) -> None:
+    order = broker._orders[pos.stop_order_id]
+    broker.seed_order(replace(order, expires_at=expires_at))
+
+
+def test_refresh_stale_stop_false_when_far_from_expiry():
+    broker = FakeBroker()
+    om = OrderManager(broker)
+    pos = om.open_position(make_decision(), make_ratchet(), tag="t1")
+    om.settle(pos)
+    now = datetime.now(timezone.utc)
+    _set_stop_expiry(broker, pos, now + timedelta(days=40))  # well past the 15d default margin
+
+    assert om.refresh_stale_stop(pos, now=now, min_days_remaining=15) is False
+    assert broker.replaced == []
+
+
+def test_refresh_stale_stop_replaces_at_same_price_when_near_expiry():
+    """Within the safety margin: replace at the SAME price (identical
+    protection level) purely to reset Alpaca's 90-day clock, and track the
+    new order id the same way raise_stop does."""
+    broker = FakeBroker()
+    om = OrderManager(broker)
+    pos = om.open_position(make_decision(), make_ratchet(), tag="t1")
+    om.settle(pos)
+    old_stop_id = pos.stop_order_id
+    now = datetime.now(timezone.utc)
+    _set_stop_expiry(broker, pos, now + timedelta(days=10))  # inside the 15d default margin
+
+    assert om.refresh_stale_stop(pos, now=now, min_days_remaining=15) is True
+
+    assert broker.replaced[-1] == (old_stop_id, pytest.approx(pos.current_stop))
+    assert pos.stop_order_id != old_stop_id       # replace returns a new order id
+    assert pos.current_stop == pytest.approx(90.0)  # protection level unchanged
 
 
 def test_close_liquidates_and_cancels_legs():

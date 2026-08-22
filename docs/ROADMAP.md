@@ -108,16 +108,63 @@ De-risked order of construction. Each step is testable before the next.
   idempotency, propagate-not-swallow on failure). The 8 real positions
   themselves still need a one-time remediation pass using this same new
   mechanism -- not yet run, pending go-ahead.
+- [x] Fixed a gap found 2026-08-21 via a research pass cross-referencing this
+  project against Alpaca's own docs, the installed alpaca-py SDK, established
+  OSS trading engines (NautilusTrader, Freqtrade, Hummingbot, QuantConnect
+  LEAN), and regulatory guidance (SEC 15c3-5, FINRA 15-09, FIA's ATS guide) --
+  see docs/SAFEGUARDS.md "GTC aged-order policy". Alpaca auto-cancels a GTC
+  order 90 days after creation unless modified again (confirmed against the
+  installed SDK's `Order.expires_at` field, not just the docs prose).
+  `OrderManager.raise_stop` only replaces the resting stop when the ratchet
+  actually advances, so a flat or losing position's stop -- realistic on a
+  system that holds positions for weeks/months -- could silently expire
+  hours after that day's cycle already ran, going naked until the next
+  cycle's reconcile caught it. `OrderManager.refresh_stale_stop`, called each
+  execute-mode cycle, replaces any resting stop within
+  `settings.execution.stop_refresh_min_days_remaining` (default 15d) of
+  `expires_at` at its own current price -- resets Alpaca's clock, no
+  protection-level change, no new process. The same research pass confirmed
+  the existing OTO/bracket fix (above) matches Alpaca's own community-forum
+  workaround independently, and that this project's deterministic risk/
+  execution core matches every source's definition of production-grade (not
+  a gap) -- full findings in the session's plan file.
+- [x] Removed the PDT tracker (2026-08-21) -- `src/risk/pdt_tracker.py`,
+  `RiskManager`'s PDT gate, `config/risk_limits.yaml`'s `pdt:` block,
+  `AccountView.daytrade_count`/`pattern_day_trader`, `AccountState.
+  is_intraday`/`day_trade_count`, and every call site (orchestrator,
+  discovery/pipeline, trade_service, backtester, scripts, congress_copy).
+  Two independent, confirmed reasons: (1) FINRA retired the Pattern Day
+  Trader rule (Regulatory Notice 26-10, effective 2026-06-04) for a dynamic
+  intraday-margin framework, and Alpaca removed the underlying API fields on
+  2026-07-06, recommending `buying_power` instead -- the $25k/4-day-trades
+  rule this project enforced no longer exists at the broker. (2) The gate
+  was independently dead code regardless: every caller hardcoded
+  `is_intraday=False` (this is a daily-swing system, never a same-day
+  round-trip), so it had never once fired. `RiskManager.evaluate()`'s step
+  numbering is left as-is (step 4 retired, not renumbered) so existing
+  "step 7"/"step 7.5" references in docs/STRATEGIES.md and
+  docs/SAFEGUARDS.md stay accurate. The original Step 2 entry above and the
+  2026-08-11 incident entry are left as written -- real history, not
+  rewritten just because the code they describe is now gone.
 - [ ] Step 7: paper EXECUTE smoke (--execute) ONLY after validation passes; then small real capital.
   Candidate next moves before that: let trend_following accumulate more live/backtest
   history before deciding; still no strategy has a live paper-trading track record
   backing the backtest verdict.
-- [x] `mean_reversion` disabled via `state/rotation.json` (`RotationState.apply("disable",
-  "mean_reversion")`) — it was net-negative (PF 0.57) rather than just under-sampled, per
-  Step 6b. Note: the per-strategy `enabled:` flag in `config/strategies.yaml` is NOT the
-  live gate (`build_strategies` never reads it) — the orchestrator checks
-  `state/rotation.json` each cycle instead, so this must be applied there (or via
-  `/rotate disable mean_reversion` from the phone), not by editing the yaml.
+- [x] `mean_reversion` disabled — it was net-negative (PF 0.57) rather than just
+  under-sampled, per Step 6b. Originally applied only via `state/rotation.json`
+  (`RotationState.apply("disable", "mean_reversion")`), which is per-deployment
+  and gitignored — meaning a fresh clone silently inherited the rejected
+  strategy fully enabled, and `build_strategies` never even read the per-strategy
+  `enabled:` flag in `config/strategies.yaml` that a new self-hoster would
+  reach for instead. Fixed 2026-08-22: `RotationState.is_enabled()` now takes a
+  `default` param, seeded from that `enabled:` flag by the orchestrator and the
+  phone listener (`RotationService`'s guardrails use the same defaults, so
+  "can't disable the last active strategy" still accounts for a
+  config-disabled strategy correctly). `config/strategies.yaml` now ships
+  `mean_reversion.enabled: false`, so a fresh clone starts matching this
+  project's own validated decision; `/rotate enable mean_reversion` (or editing
+  the yaml, for the next fresh deployment) both still work as the two ways to
+  turn it back on.
 
 ## Agentic orchestrator rebuild (in progress)
 
@@ -159,6 +206,14 @@ agentic-rebuild memory. Phase by phase, each shipped with tests:
   halts, gated by verifier + cooldown + daily cap + phone notify. Reconcile-mismatch
   and kill-switch are excluded from the whitelist (never auto-resume). The
   anomaly_triage agent diagnoses + recommends but never clears a halt itself.
+  Wiring note (2026-08-21): `scripts/run_self_heal.py`'s escalation path
+  claimed to call this agent since Phase 5 shipped, but never actually did --
+  a real doc/code gap found during an architecture review, not a design
+  change. `_try_agent_diagnosis()` now actually calls it, best-effort,
+  ONLY when `ANTHROPIC_API_KEY` is set; any failure (or no key) falls back
+  to exactly the deterministic incident brief alone, byte-identical to
+  before this existed. See "Human-in-the-loop reasoning" below for why the
+  default deployment still doesn't need a key at all.
 - [x] **Live attribution wiring** (`order_manager.realized_pnl`, `orchestrator._record_attribution`):
   real closes (signal exit, stop-fired auto-close) record realized PnL per strategy to the
   scoreboard's live columns (best-effort, never affects a cycle; exit price is a proxy --
@@ -168,8 +223,16 @@ agentic-rebuild memory. Phase by phase, each shipped with tests:
   mode. The bot is fully deterministic + keyless; cognitive jobs are emitted as structured
   paste-into-Claude.ai briefs. Telegram: `/review` (strategy brief), `/brief SYM` (symbol brief),
   `/rotate <action> <strategy> [w]` (propose → Approve/Deny); self-heal escalation sends an
-  incident brief. Claude.ai Pro is the human-mediated advisor; the Anthropic-SDK agents stay
-  built+tested but DORMANT (future upgrade via API key or a local LLM through ModelClient).
+  incident brief -- optionally enriched by the anomaly_triage agent (Phase 5, above) when a
+  key is present. Claude.ai Pro remains the human-mediated advisor either way.
+  Disposition, reviewed 2026-08-21 (architecture plan, see the session's plan file): `nl.py`
+  (Telegram's smart parser, regex fallback) and now `triage.py` are live, gated purely by
+  key presence -- not "dormant," genuinely optional. `analyst.py` (`StrategyAnalyst`,
+  `/review`'s LLM path) remains unwired by deliberate choice: `/review`'s brief-based flow
+  already works well and isn't broken, so it was left alone rather than wired for its own
+  sake. `src/discovery/weight_advisor.py` (the source-reweighting advisor) deliberately does
+  NOT route through this framework either, so the one adaptive feature this project has
+  still needs no API key -- see "Phase D2" below.
 - [ ] **Phase 6 — scale & observability** (data-driven registries, per-agent budgets, decision audit).
 
 221 tests pass (offline, no creds).
@@ -198,8 +261,21 @@ everything else. Daily entrypoint `scripts.run_discovery`; on-demand `/ideas`.
 - [x] **Phase D — source learning** (`discovery/ledger.py`, `/sources`): append-only
   ledger of every surfaced idea + which sources voted; `/sources` summarises
   per-source contribution. Outcome P&L flows through the existing strategy
-  scoreboard (congress ideas → `congress_copy` row). Weight changes stay manual
-  (`discovery.weights`) — no self-adjusting black box.
+  scoreboard (congress ideas → `congress_copy` row).
+- [x] **Phase D2 — bounded weight advisor** (`discovery/weight_advisor.py`,
+  `/reweight`, 2026-08-21): `discovery.weights` is still never self-adjusting —
+  that decision from Phase D stands — but it's no longer manual-analysis-only
+  either. `/reweight` computes a SUGGESTED reweighting from the ledger's
+  already-tracked per-source contribution stats (proposal rate × avg score,
+  sources below a sample-size floor left untouched, any single suggestion
+  capped to a bounded relative move) and pushes it Approve/Deny, exactly like
+  `/rotate` for strategies. Nothing applies without a tap; the formula and its
+  inputs are printed in the proposal text, not hidden in a model. This is the
+  one place this project's architecture review (see the session's plan file)
+  concluded "adaptive, not static" belongs — deliberately not the risk gate,
+  sizing, or strategy entry/exit logic, which stay deterministic to match
+  every source that review checked (SEC 15c3-5, FINRA 15-09, and how
+  NautilusTrader/Freqtrade/Hummingbot/QuantConnect LEAN are all built).
 
 Config: `settings.yaml` → `discovery:` (top_n, min_score, source toggles,
 weights, congress filters, universe extras).
@@ -235,7 +311,33 @@ weights, congress filters, universe extras).
   Still holds trading credentials under the hood (Alpaca ties account reads to the
   trading key, no separate read-only key type exists), but can never place, replace,
   or cancel an order even after a future edit to these call sites.
-- Move remaining hardcoded params to config.
+- [x] Moved remaining hardcoded strategy params to config (2026-08-22), same
+  values, no behavior change: `regime_filter.atr_slope_lookback` (was
+  `_ATR_SLOPE_LOOKBACK` in `regime_filter.py`), `trend_following.conditions.
+  pullback_proximity_pct` (was `_PROXIMITY`), and each strategy's `confidence:`
+  block/scalar (trend_following's ADX-scaled formula, mean_reversion's and
+  breakout's flat 0.6/0.65) — all in `config/strategies.yaml`, schema-validated.
+- [x] Fixed a real gap found 2026-08-22 during an architecture-flexibility pass:
+  `mode: live` did not, and could not, actually connect to a real account.
+  Every entrypoint constructed `AlpacaBroker()` with zero arguments, and
+  `paper` defaults to `True` in the constructor — `config.is_live` and
+  `--allow-live` only gated whether `Orchestrator.run_cycle()` let a cycle
+  *proceed*, never which Alpaca environment the broker's `TradingClient`
+  actually pointed at. So even with both flags set, a "live" cycle still
+  talked to the paper API. New `build_broker(config, allow_live=...)`
+  (`src/execution/broker_alpaca.py`) is now the one place that decides:
+  paper unless BOTH `mode: live` in config AND the caller explicitly passes
+  `allow_live=True` — only `scripts/run_paper.py`'s `--allow-live` flag ever
+  does that, matching what was already documented as the intended mechanism.
+  `manual_order.py`, `run_telegram.py` (phone orders are paper-only in v1,
+  by construction now, not just by convention), and
+  `reattach_missing_stops.py` go through the same factory but never pass
+  `allow_live`, so they can never end up live by omission. The orchestrator's
+  own `is_live and execute and not allow_live -> HALT` check is left in place
+  as an independent second layer — two signals must agree, at two different
+  points, before any order reaches a real account. New tests in
+  `tests/unit/test_broker_alpaca.py` pin all four combinations (paper stays
+  paper with either signal alone; live requires both).
 
 ## Findings
 - (Resolved) First backtest (3 symbols, ~75 usable days after 200EMA warmup): trend-pullback

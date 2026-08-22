@@ -17,7 +17,8 @@ Boundary: places orders NO, holds trading credentials NO.
 
 from __future__ import annotations
 
-from typing import Any, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 from src.common.config import Config
 from src.common.logging import get_logger
@@ -164,7 +165,7 @@ class NullNotifier:
 
     enabled = False
 
-    def alert(self, event: str, detail: str = "") -> None:  # noqa: D401
+    def alert(self, event: str, detail: str = "") -> None:
         return None
 
     def proposal(self, proposal) -> None:
@@ -185,7 +186,7 @@ _EVENT_EMOJI = {
 }
 
 
-def build_notifier(config: Config) -> "Notifier | NullNotifier":
+def build_notifier(config: Config) -> Notifier | NullNotifier:
     """Construct a Notifier from config + env, or a NullNotifier when Telegram
     is not configured or alerts are disabled. Never raises."""
     try:

@@ -25,9 +25,11 @@ Boundary: places orders YES, holds trading credentials YES.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Protocol
 
+from src.common.config import Config
 from src.common.models import Side
 from src.common.secrets import TradingCredentials, load_trading_credentials
 
@@ -53,6 +55,13 @@ class OrderView:
     limit_price: float | None = None
     filled_qty: float = 0.0
     filled_avg_price: float | None = None
+    # When Alpaca will auto-cancel this order if it's never modified again --
+    # ONLY set for GTC orders. Alpaca's aged-order policy cancels a GTC order
+    # 90 days after creation (modifying it resets the clock); see
+    # docs.alpaca.markets/us/docs/orders-at-alpaca and OrderManager.
+    # refresh_stale_stop, which uses this to keep a long-resting protective
+    # stop from silently expiring.
+    expires_at: datetime | None = None
     legs: tuple = ()
 
 
@@ -61,14 +70,13 @@ class AccountView:
     equity: float
     last_equity: float
     buying_power: float
-    # Optional to match alpaca-py's own TradeAccount.daytrade_count typing --
-    # Alpaca can genuinely omit this (e.g. before it's been computed for a
-    # fresh account). AccountState.day_trade_count downstream (risk_manager.py)
-    # already treats None as "no broker reconciliation this cycle, trust the
-    # local PDT tracker" -- forcing an int() cast here used to crash the WHOLE
-    # cycle on a None instead of falling through to that already-safe path.
-    daytrade_count: int | None
-    pattern_day_trader: bool
+    # daytrade_count/pattern_day_trader removed 2026-08-21: FINRA retired the
+    # Pattern Day Trader rule (Regulatory Notice 26-10, effective 2026-06-04)
+    # for a dynamic intraday-margin framework, and Alpaca removed these API
+    # fields on 2026-07-06, recommending buying_power (already present above)
+    # as the replacement. See docs/ROADMAP.md for the 2026-08-11 incident
+    # these fields were originally hardened for (Optional[int] None-handling)
+    # -- history kept there, not rewritten, even though the fields are gone.
 
 
 @dataclass(frozen=True)
@@ -147,8 +155,6 @@ class AlpacaBroker:
             equity=float(a.equity),
             last_equity=float(a.last_equity),
             buying_power=float(a.buying_power),
-            daytrade_count=int(a.daytrade_count) if a.daytrade_count is not None else None,
-            pattern_day_trader=bool(a.pattern_day_trader),
         )
 
     def is_market_open(self) -> bool:
@@ -229,7 +235,9 @@ class AlpacaBroker:
         a persistent protective exit outside the bracket/OTO structure."""
         from alpaca.trading.enums import OrderClass, TimeInForce
         from alpaca.trading.requests import (
-            LimitOrderRequest, StopLossRequest, TakeProfitRequest,
+            LimitOrderRequest,
+            StopLossRequest,
+            TakeProfitRequest,
         )
 
         req = LimitOrderRequest(
@@ -272,6 +280,7 @@ class AlpacaBroker:
             filled_avg_price=(
                 float(o.filled_avg_price) if getattr(o, "filled_avg_price", None) else None
             ),
+            expires_at=getattr(o, "expires_at", None),
             legs=legs,
         )
 
@@ -299,3 +308,19 @@ class AlpacaAccountReader:
 
     def list_positions(self) -> list[PositionView]:
         return self._broker.list_positions()
+
+
+def build_broker(config: Config, *, allow_live: bool = False) -> AlpacaBroker:
+    """The one place that decides paper vs. live. Defaults to paper unconditionally;
+    only goes live when BOTH `config.settings.mode: live` AND the caller explicitly
+    passes `allow_live=True` (today, only scripts/run_paper.py's --allow-live flag
+    ever does that) -- the same two-signal requirement Orchestrator.run_cycle()
+    independently re-checks before executing, so a caller that forgets to wire
+    allow_live, or any other entrypoint (manual_order, run_telegram, reattach_
+    missing_stops), can never end up live by omission. Centralizing this also
+    means a second broker implementation later is a one-function change, not a
+    grep-and-replace across every entrypoint that used to call AlpacaBroker()
+    directly.
+    """
+    live = bool(config.is_live) and allow_live
+    return AlpacaBroker(paper=not live)

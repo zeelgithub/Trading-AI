@@ -9,21 +9,22 @@ mirrors them as intents:
   - a disclosed SELL -> close the mirrored position if we hold it.
 
 Every mirrored buy is routed through the SAME risk gatekeeper the rest of the
-bot uses. This module decides and logs; it does NOT place orders (shadow). When
-execution is enabled, approved intents are handed to the order manager.
+bot uses. This module decides and logs; it does NOT place orders -- v1 is
+shadow-only, with no execute toggle (unlike src/discovery/, this module
+doesn't yet route decisions through a propose/approve flow either).
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import date
 from pathlib import Path
-from typing import Callable
 
 from congress_copy.models import DisclosedTrade
 from src.common.logging import AuditLog
-from src.common.models import Action, Decision, Intent, Side
+from src.common.models import Action, Intent, Side
 from src.risk.risk_manager import AccountState, RiskManager
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -36,7 +37,6 @@ class CopyConfig:
     max_disclosure_age_days: int = 60
     initial_stop_pct: float = 10.0
     strategy_name: str = "congress_copy"
-    execute: bool = False  # shadow by default
 
 
 @dataclass

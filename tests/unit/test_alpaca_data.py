@@ -12,7 +12,7 @@ import pandas as pd
 import pytest
 
 from src.common.secrets import MarketDataCredentials
-from src.data.providers.alpaca_data import AlpacaData, _OHLCV
+from src.data.providers.alpaca_data import _OHLCV, AlpacaData
 
 
 def _creds() -> MarketDataCredentials:

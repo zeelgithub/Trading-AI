@@ -16,11 +16,15 @@ response without it crashed every cycle it hit.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
+from dataclasses import replace as dc_replace
+
+from src.common.config import load_config
 from src.common.models import Side
 from src.common.secrets import TradingCredentials
-from src.execution.broker_alpaca import AlpacaBroker
+from src.execution.broker_alpaca import AlpacaBroker, build_broker
 
 
 def _creds() -> TradingCredentials:
@@ -75,13 +79,16 @@ class _CapturingClient:
 
 
 def _fake_account(**overrides) -> SimpleNamespace:
-    base = {"equity": "10000.0", "last_equity": "10050.0", "buying_power": "20000.0",
-            "daytrade_count": 1, "pattern_day_trader": False}
+    base = {"equity": "10000.0", "last_equity": "10050.0", "buying_power": "20000.0"}
     base.update(overrides)
     return SimpleNamespace(**base)
 
 
 def test_get_account_maps_fields() -> None:
+    """daytrade_count/pattern_day_trader are no longer read at all: FINRA
+    retired the PDT rule (Regulatory Notice 26-10, 2026-06-04) and Alpaca
+    removed these API fields on 2026-07-06 -- see broker_alpaca.py's
+    AccountView docstring and docs/ROADMAP.md."""
     broker = AlpacaBroker(creds=_creds())
     _install_fake_client(broker, SimpleNamespace(get_account=lambda: _fake_account()))
 
@@ -90,24 +97,6 @@ def test_get_account_maps_fields() -> None:
     assert acct.equity == 10000.0
     assert acct.last_equity == 10050.0
     assert acct.buying_power == 20000.0
-    assert acct.daytrade_count == 1
-    assert acct.pattern_day_trader is False
-
-
-def test_get_account_handles_none_daytrade_count() -> None:
-    """Regression: alpaca-py types TradeAccount.daytrade_count as
-    Optional[int] -- a bare int() cast on a None response used to raise
-    TypeError and HALT the whole cycle. daytrade_count=None must pass
-    through cleanly; risk_manager.py already treats None as 'skip broker
-    reconciliation, trust the local PDT tracker' (see AccountState.day_trade_count)."""
-    broker = AlpacaBroker(creds=_creds())
-    _install_fake_client(
-        broker, SimpleNamespace(get_account=lambda: _fake_account(daytrade_count=None)),
-    )
-
-    acct = broker.get_account()
-
-    assert acct.daytrade_count is None
 
 
 def test_submit_market_entry_is_day_no_legs_no_order_class() -> None:
@@ -158,6 +147,37 @@ def test_submit_stop_for_short_position_exits_via_buy() -> None:
     assert client.submitted.side == OrderSide.BUY
 
 
+def test_get_order_maps_expires_at() -> None:
+    """OrderView.expires_at feeds OrderManager.refresh_stale_stop, which
+    proactively refreshes a resting GTC stop before Alpaca's 90-day
+    aged-order policy auto-cancels it (docs.alpaca.markets/us/docs/
+    orders-at-alpaca; confirmed against alpaca-py's Order.expires_at field
+    on the installed SDK). Must map through unchanged when present, and
+    stay None for order types that don't carry one."""
+    when = datetime(2026, 11, 1, 16, 15, tzinfo=timezone.utc)
+    broker = AlpacaBroker(creds=_creds())
+    order = SimpleNamespace(
+        id="o1", client_order_id="c1", symbol="AAPL", qty=10, side="sell",
+        type="stop", status="held", stop_price=90.0, limit_price=None,
+        filled_qty=0, filled_avg_price=None, legs=(), expires_at=when,
+    )
+    _install_fake_client(broker, SimpleNamespace(get_order_by_id=lambda oid: order))
+
+    assert broker.get_order("o1").expires_at == when
+
+
+def test_get_order_expires_at_defaults_none_when_absent() -> None:
+    broker = AlpacaBroker(creds=_creds())
+    order = SimpleNamespace(
+        id="o1", client_order_id="c1", symbol="AAPL", qty=10, side="buy",
+        type="market", status="filled", stop_price=None, limit_price=None,
+        filled_qty=10, filled_avg_price=100.0, legs=(),
+    )  # no expires_at attribute at all -- mirrors a DAY order's real response
+    _install_fake_client(broker, SimpleNamespace(get_order_by_id=lambda oid: order))
+
+    assert broker.get_order("o1").expires_at is None
+
+
 def test_submit_oco_exit_is_gtc_oco_with_both_legs() -> None:
     from alpaca.trading.enums import OrderClass, TimeInForce
 
@@ -176,3 +196,37 @@ def test_submit_oco_exit_is_gtc_oco_with_both_legs() -> None:
     assert req.stop_loss.stop_price == 90.0
     assert req.take_profit.limit_price == 110.0
     assert len(order.legs) == 2
+
+
+# --- build_broker: the one place that decides paper vs. live ---
+
+def _config(*, mode: str):
+    base = load_config()
+    return dc_replace(base, settings={**base.settings, "mode": mode})
+
+
+def test_build_broker_defaults_to_paper(monkeypatch) -> None:
+    monkeypatch.setattr("src.execution.broker_alpaca.load_trading_credentials", _creds)
+    broker = build_broker(_config(mode="paper"))
+    assert broker._paper is True
+
+
+def test_build_broker_live_mode_alone_is_not_enough(monkeypatch) -> None:
+    # mode: live without allow_live=True must still be paper -- the whole
+    # point of requiring both signals.
+    monkeypatch.setattr("src.execution.broker_alpaca.load_trading_credentials", _creds)
+    broker = build_broker(_config(mode="live"))
+    assert broker._paper is True
+
+
+def test_build_broker_allow_live_alone_is_not_enough(monkeypatch) -> None:
+    # allow_live=True with mode: paper must still be paper.
+    monkeypatch.setattr("src.execution.broker_alpaca.load_trading_credentials", _creds)
+    broker = build_broker(_config(mode="paper"), allow_live=True)
+    assert broker._paper is True
+
+
+def test_build_broker_goes_live_only_with_both_signals(monkeypatch) -> None:
+    monkeypatch.setattr("src.execution.broker_alpaca.load_trading_credentials", _creds)
+    broker = build_broker(_config(mode="live"), allow_live=True)
+    assert broker._paper is False

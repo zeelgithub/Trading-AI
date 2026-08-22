@@ -149,6 +149,29 @@ exited exactly at the stop level; it now uses the real fill when the broker repo
 one. The existing aggregate open-risk cap (`account.max_open_risk_pct`, Tier 1 above)
 still bounds the portfolio-level worst case regardless of any single gap's slippage.
 
+## GTC aged-order policy (90 days) — resting stops are proactively refreshed
+
+Alpaca auto-cancels a GTC order 90 days after creation unless it's modified
+again, which resets the clock
+([docs.alpaca.markets/us/docs/orders-at-alpaca](https://docs.alpaca.markets/us/docs/orders-at-alpaca);
+confirmed directly against the installed alpaca-py SDK's `Order.expires_at`
+field). `OrderManager.raise_stop` only replaces the resting stop when the
+ratchet actually advances — a flat or losing position's stop can otherwise sit
+unmodified indefinitely, and this is a daily-swing system that holds positions
+for weeks or months (docs/STRATEGIES.md), so a hold well past 90 days is
+realistic, not theoretical.
+
+Each cycle, `Orchestrator._refresh_stale_stops` →
+`OrderManager.refresh_stale_stop` checks every OPEN position's resting stop
+against its broker-reported `expires_at`; once it's within
+`settings.execution.stop_refresh_min_days_remaining` (default 15 days) of
+expiring, the stop is replaced at its OWN current price — identical
+protection level, but Alpaca treats the replace as a modification and resets
+the 90-day clock. Execute-mode only (shadow/propose place nothing); a failed
+refresh doesn't halt the cycle (the existing resting stop still protects the
+position, just with its aging clock unchanged) but does count toward the
+consecutive-error breaker, same posture as a failed `raise_stop`.
+
 ## Market-hours rule
 
 New entries are **refused while the market is closed** — everywhere, including

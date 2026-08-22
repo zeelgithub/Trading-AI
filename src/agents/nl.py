@@ -15,7 +15,7 @@ Boundary: parsing only; places orders NO.
 
 from __future__ import annotations
 
-from typing import Callable, Optional
+from collections.abc import Callable
 
 from src.agents.catalog import NL_ROUTER
 from src.agents.dispatch import AgentRequest, Dispatcher
@@ -25,7 +25,7 @@ from src.common.logging import get_logger
 
 log = get_logger("agents.nl")
 
-FallbackFn = Callable[[str], Optional[dict]]
+FallbackFn = Callable[[str], dict | None]
 ModelFactory = Callable[[str], ModelClient]
 
 _KNOWN = {"status", "pending", "buy", "close", "flatten", "halt", "reset", "run", "help", "unknown"}

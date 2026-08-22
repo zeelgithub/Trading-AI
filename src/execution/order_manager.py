@@ -16,6 +16,7 @@ Boundary: submits via the BrokerInterface only.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
 
 from src.common.errors import retry_transient
@@ -64,7 +65,7 @@ class ManagedPosition:
     open_tag: str = ""
 
 
-def is_dead_entry(position: "ManagedPosition") -> bool:
+def is_dead_entry(position: ManagedPosition) -> bool:
     """True when a PENDING_ENTRY settled to CLOSED with zero fill -- the
     broker rejected/canceled/expired it rather than it ever opening."""
     return (position.status == PositionStatus.CLOSED
@@ -211,6 +212,37 @@ class OrderManager:
         updated = self.broker.replace_stop(position.stop_order_id, new_stop)
         position.stop_order_id = updated.id
         position.current_stop = new_stop
+        return True
+
+    def refresh_stale_stop(
+        self, position: ManagedPosition, now: datetime, min_days_remaining: int = 15,
+    ) -> bool:
+        """Proactively reset Alpaca's 90-day GTC aged-order clock on a
+        long-resting stop, before it ever gets close to expiring.
+
+        Alpaca auto-cancels a GTC order 90 days after creation unless it's
+        modified again, which resets the clock (docs.alpaca.markets/us/docs/
+        orders-at-alpaca; confirmed against the installed alpaca-py SDK's
+        Order.expires_at field). `raise_stop` above only replaces the resting
+        stop when the ratchet actually advances -- a flat or losing position's
+        stop can sit unmodified indefinitely on this daily-swing system, which
+        holds positions for weeks or months (docs/STRATEGIES.md). Once the
+        resting stop's expiry is within `min_days_remaining`, replace it at
+        its OWN current price: identical protection level, but Alpaca treats
+        the replace as a modification and resets the 90-day clock. Returns
+        True if a refresh was performed.
+        """
+        if position.stop_order_id is None:
+            return False
+        order = retry_transient(lambda: self.broker.get_order(position.stop_order_id))
+        if order.expires_at is None:
+            return False  # not a GTC order, or the broker didn't report one -- nothing to do
+        if (order.expires_at - now).days > min_days_remaining:
+            return False
+        updated = retry_transient(
+            lambda: self.broker.replace_stop(position.stop_order_id, position.current_stop)
+        )
+        position.stop_order_id = updated.id
         return True
 
     def close(self, position: ManagedPosition, reason: str = "signal") -> ManagedPosition:

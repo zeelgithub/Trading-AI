@@ -34,20 +34,22 @@ import time
 from src.agents.nl import NLCommandParser
 from src.common.config import load_config
 from src.common.logging import get_logger
+from src.common.secrets import load_notification_credentials
+from src.core.orchestrator import Orchestrator
 from src.core.portfolio_view import positions_snapshot, scoreboard_snapshot
+from src.core.proposals import ProposalStore
 from src.core.rotation import RotationService
+from src.core.symbols import SymbolResolver
+from src.core.trade_service import TradeService
 from src.data.queries import indicator_snapshot
 from src.discovery.builder import build_discovery_pipeline
 from src.discovery.ledger import DiscoveryLedger
 from src.discovery.pipeline import Account
+from src.discovery.scorer import Scorer
+from src.discovery.weight_advisor import DiscoveryWeightService
+from src.execution.broker_alpaca import build_broker
 from src.notify.briefs import strategy_review_brief, symbol_brief
 from src.notify.digest import idea_text, ideas_header, source_summary
-from src.common.secrets import load_notification_credentials
-from src.core.orchestrator import Orchestrator
-from src.core.proposals import ProposalStore
-from src.core.symbols import SymbolResolver
-from src.core.trade_service import TradeService
-from src.execution.broker_alpaca import AlpacaBroker
 from src.notify.telegram import TelegramClient, build_notifier
 
 log = get_logger("telegram")
@@ -84,7 +86,8 @@ HELP = (
     "/strategies — scoreboard (verdicts + live P&L)\n"
     "/review — strategy brief to paste into Claude.ai\n"
     "/brief SYM — symbol brief to paste into Claude.ai\n"
-    "/rotate <enable|disable|reweight> SYM [w] — propose a rotation\n\n"
+    "/rotate <enable|disable|reweight> SYM [w] — propose a rotation\n"
+    "/reweight — suggest a discovery source reweighting from the ledger\n\n"
     "💬 Natural language — just type or speak:\n"
     '  "buy 15 Tesla with 8% stop"\n'
     '  "show my positions"\n'
@@ -100,7 +103,9 @@ class Listener:
         self.config = load_config()
         self.creds = load_notification_credentials()
         self.client = TelegramClient(self.creds)
-        self.broker = AlpacaBroker()
+        # No allow_live here: phone orders are paper-only in v1 (README), by
+        # construction, not just by convention.
+        self.broker = build_broker(self.config)
         # Dynamic symbol resolution: the broker's full asset catalog (cached),
         # with the nickname table as an alias layer on top.
         self.service = TradeService(
@@ -115,7 +120,25 @@ class Listener:
         # rotation state the orchestrator reads, so an approval takes effect next cycle.
         strategy_names = tuple(self.config.strategies.get("strategies", {}).keys()) or (
             "trend_following", "mean_reversion", "breakout")
-        self.rotation = RotationService(strategy_names)
+        # Same config-seeded defaults the orchestrator uses, so guardrails
+        # (e.g. "can't disable the last active strategy") see a strategy
+        # that ships disabled in config as already inactive, not as a false
+        # "still on" that a rotation could silently stack disables on top of.
+        strategy_defaults = {
+            name: self.config.get(f"strategies.strategies.{name}.enabled", True)
+            for name in strategy_names
+        }
+        self.rotation = RotationService(strategy_names, strategy_defaults=strategy_defaults)
+        # Discovery source reweighting: same propose-then-approve shape as
+        # rotation above, but the suggestion is computed from the ledger
+        # (src/discovery/weight_advisor.py) instead of an analyst. Reuses
+        # Scorer's own config parsing so "current weights" here can never
+        # drift from what the live pipeline actually scores with.
+        _scorer_defaults = Scorer.from_config(self.config)
+        self.weight_advisor = DiscoveryWeightService(
+            active_sources=_scorer_defaults.active_sources,
+            default_weights=_scorer_defaults.weights,
+        )
 
     # --- top-level message routing ---
 
@@ -182,6 +205,8 @@ class Listener:
             self._symbol_brief(chat_id, rest)
         elif cmd == "rotate":
             self._rotate(chat_id, rest)
+        elif cmd == "reweight":
+            self._reweight(chat_id)
         else:
             self._send(chat_id, f"Unknown command: /{cmd}\n\n{HELP}")
 
@@ -449,6 +474,7 @@ class Listener:
             # ffmpeg subprocess (capture_output=True == stderr=PIPE) which also
             # hits errno 22. Passing an array skips that internal subprocess entirely.
             import wave as _wave
+
             import numpy as _np
             with _wave.open(wav_path, "rb") as wf:
                 frames = wf.readframes(wf.getnframes())
@@ -501,6 +527,10 @@ class Listener:
                 self._on_rotation_approve(chat_id, message_id, cq_id, data.split(":", 1)[1])
             elif data.startswith("rotdeny:"):
                 self._on_rotation_deny(chat_id, message_id, cq_id, data.split(":", 1)[1])
+            elif data.startswith("wgtapprove:"):
+                self._on_weight_approve(chat_id, message_id, cq_id, data.split(":", 1)[1])
+            elif data.startswith("wgtdeny:"):
+                self._on_weight_deny(chat_id, message_id, cq_id, data.split(":", 1)[1])
             elif data.startswith("buy:"):
                 self._on_buy_confirm(chat_id, message_id, cq_id, data)
             elif data == "flatten":
@@ -610,7 +640,6 @@ class Listener:
             equity=account_raw.equity,
             last_equity=account_raw.last_equity,
             buying_power=account_raw.buying_power,
-            daytrade_count=getattr(account_raw, "daytrade_count", None),
         )
         positions = self.service.store.load()
         exclude = {p.symbol for p in self.proposals.list_pending()}
@@ -711,6 +740,33 @@ class Listener:
     def _on_rotation_deny(self, chat_id, message_id, cq_id, proposal_id: str) -> None:
         self.rotation.deny(proposal_id)
         self._edit(chat_id, message_id, "❌ Rotation denied.")
+        self._answer(cq_id, "Denied.")
+
+    # --- discovery source reweighting (ledger-driven, you approve) ---
+
+    def _reweight(self, chat_id) -> None:
+        """Compute a suggested discovery-source reweighting from the ledger
+        and, if there's anything meaningful, push it Approve/Deny -- never
+        applies on its own (src/discovery/weight_advisor.py)."""
+        res = self.weight_advisor.suggest()
+        if not res["ok"]:
+            self._send(chat_id, f"No reweighting suggested right now ({res['error']}).")
+            return
+        self._send(chat_id, f"🟡 REWEIGHT SOURCES\n{res['summary']}",
+                   buttons=[[("✅ Approve", f"wgtapprove:{res['proposal_id']}"),
+                             ("❌ Deny", f"wgtdeny:{res['proposal_id']}")]])
+
+    def _on_weight_approve(self, chat_id, message_id, cq_id, proposal_id: str) -> None:
+        res = self.weight_advisor.approve(proposal_id)
+        if res["ok"]:
+            self._edit(chat_id, message_id, f"✅ Applied: {res['summary']}")
+            self._answer(cq_id, "Applied.")
+        else:
+            self._answer(cq_id, res.get("error", "failed")[:200])
+
+    def _on_weight_deny(self, chat_id, message_id, cq_id, proposal_id: str) -> None:
+        self.weight_advisor.deny(proposal_id)
+        self._edit(chat_id, message_id, "❌ Reweighting denied.")
         self._answer(cq_id, "Denied.")
 
     # --- telegram helpers (best-effort) ---

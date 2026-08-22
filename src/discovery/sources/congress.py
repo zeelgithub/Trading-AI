@@ -1,9 +1,12 @@
 """
 Congress source -- discovery layer.
 
-Turns congressional disclosures (CapitolTrades rows written to disclosures.json
-by the scheduled Chrome ingestion job) into buy candidates. This is what lets a
-*new* ticker -- one not on your watchlist -- surface as an idea.
+Turns congressional disclosures (rows in disclosures.json -- see
+congress_copy/README.md "Scheduled ingestion": not shipped, bring your own)
+into buy candidates. This is what lets a *new* ticker -- one not on your
+watchlist -- surface as an idea. Off by default (config/settings.yaml
+discovery.sources.congress) until real ingestion is wired up; otherwise this
+just re-surfaces the same frozen sample rows every run.
 
 Reality check baked into the score: STOCK Act filings lag the actual trade by
 ~30-45 days, so a fresher disclosure is worth more and we expose `lag_days` on

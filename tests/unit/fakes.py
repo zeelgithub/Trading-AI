@@ -38,7 +38,7 @@ class FakeBroker:
         self.replaced: list[tuple[str, float]] = []
         self.canceled: list[str] = []
         self.closed: list[str] = []
-        self._account = account or AccountView(50000, 50000, 200000, 0, False)
+        self._account = account or AccountView(50000, 50000, 200000)
         self.auto_fill = auto_fill
         self._market_open = market_open
         # reject_entries: simulate the broker rejecting every submitted entry

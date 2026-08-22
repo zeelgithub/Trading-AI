@@ -12,7 +12,7 @@ Boundary: proposes only; applies nothing; places orders NO.
 
 from __future__ import annotations
 
-from typing import Callable, Optional
+from collections.abc import Callable
 
 from src.agents.catalog import STRATEGY_ANALYST
 from src.agents.dispatch import AgentRequest, Dispatcher

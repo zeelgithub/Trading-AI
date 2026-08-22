@@ -19,25 +19,30 @@ Boundary: drives execution only via approved intents through the risk gate.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import date
-from typing import Callable
+from datetime import date, datetime, timezone
 
 import pandas as pd
 
 from src.common.config import Config, load_config
 from src.common.errors import is_transient_error, retry_transient
 from src.common.logging import AuditLog, get_logger
-from src.common.proclock import DEFAULT_LOCK_PATH, BotBusy, bot_lock
 from src.common.models import Decision, Side
+from src.common.proclock import DEFAULT_LOCK_PATH, BotBusy, bot_lock
 from src.core.proposals import Proposal
-from src.core.rotation import RotationState, RotationStateStore
+from src.core.rotation import RotationStateStore
 from src.core.state_machine import State, StateMachine
 from src.core.state_store import HaltClass, HaltStore, StateStore
 from src.execution.broker_alpaca import BrokerInterface
-from src.notify.telegram import NullNotifier
-from src.execution.order_manager import OrderManager, PositionStatus, is_dead_entry, realized_pnl
+from src.execution.order_manager import (
+    OrderManager,
+    PositionStatus,
+    is_dead_entry,
+    realized_pnl,
+)
 from src.execution.reconciler import Reconciler
+from src.notify.telegram import NullNotifier
 from src.research.scoreboard import Scoreboard
 from src.risk.exposure import ExposureSnapshot, compute_exposure
 from src.risk.ratchet_stop import build_ratchet
@@ -57,6 +62,7 @@ class CycleReport:
     halted: bool = False
     halt_reason: str | None = None
     stops_raised: list = field(default_factory=list)   # (symbol, new_stop)
+    stops_refreshed: list = field(default_factory=list) # symbols (90-day GTC clock reset)
     opened: list = field(default_factory=list)         # symbols
     proposed: list = field(default_factory=list)        # symbols (propose mode)
     proposals: list = field(default_factory=list)       # Proposal objects (propose mode)
@@ -111,6 +117,11 @@ class Orchestrator:
         # intended, so auto-close alerts distinctly when it does.
         self.gap_slippage_alert_pct = float(
             self.config.get("settings.alerts.gap_slippage_alert_pct", 2.0))
+        # Proactively resets a resting stop's Alpaca-side 90-day GTC
+        # aged-order clock before it ever gets close to expiring -- see
+        # _refresh_stale_stops and OrderManager.refresh_stale_stop.
+        self.stop_refresh_min_days_remaining = int(
+            self.config.get("settings.execution.stop_refresh_min_days_remaining", 15))
         # How long to wait for the cross-process state lock (vs a concurrent
         # phone action) before skipping this cycle quietly.
         self.cycle_lock_timeout = float(
@@ -219,6 +230,15 @@ class Orchestrator:
 
                 # 3. Raise resting stops (safe even when closed -- trails the stop).
                 self._raise_stops(report)
+
+                # 3b. Proactively refresh any resting stop nearing Alpaca's
+                # 90-day GTC aged-order auto-cancel -- raise_stop above only
+                # touches the order when the ratchet actually advances, so a
+                # flat/losing position could otherwise go naked before the
+                # next cycle's reconcile would notice. Real order mutation,
+                # so execute-mode only (shadow/propose place nothing).
+                if self.execute:
+                    self._refresh_stale_stops(report)
 
                 # 4. Signal exits + new entries only place orders when the market
                 #    is open (market entries/closes are rejected outside RTH).
@@ -375,6 +395,29 @@ class Orchestrator:
                 if not self.risk.breakers.register_error().ok:
                     raise RuntimeError("too many consecutive errors raising stops") from exc
 
+    def _refresh_stale_stops(self, report: CycleReport) -> None:
+        now = datetime.now(timezone.utc)
+        for symbol, pos in self.positions.items():
+            if pos.status != PositionStatus.OPEN:
+                continue
+            try:
+                if self.order_manager.refresh_stale_stop(
+                    pos, now, min_days_remaining=self.stop_refresh_min_days_remaining
+                ):
+                    report.stops_refreshed.append(symbol)
+                    self.audit.record("stop_refreshed", symbol=symbol,
+                                      detail="reset Alpaca's 90-day GTC aged-order clock")
+            except Exception as exc:
+                # Isolate: a failed refresh must not halt the cycle -- the
+                # existing resting stop still protects the position (just
+                # with its aging clock unchanged); same posture as a failed
+                # raise_stop, and the reconciler is the eventual backstop.
+                self.audit.record("stop_refresh_error", symbol=symbol, error=str(exc))
+                self.log.warning("stop refresh failed for %s (resting stop unchanged): %s",
+                                 symbol, exc)
+                if not self.risk.breakers.register_error().ok:
+                    raise RuntimeError("too many consecutive errors refreshing stops") from exc
+
     def _consider_entry(self, symbol, account, report: CycleReport) -> None:
         feats = self.feature_provider(symbol)
         if feats is None or feats.empty:
@@ -391,7 +434,11 @@ class Orchestrator:
         if active is None:
             report.skipped.append((symbol, "no regime"))
             return
-        if not self.rotation_store.load().is_enabled(active):
+        # No rotation.json entry yet => fall back to config/strategies.yaml's
+        # own enabled: flag (e.g. a strategy your own validation rejected can
+        # ship disabled) rather than always defaulting to on.
+        default_enabled = self.config.get(f"strategies.strategies.{active}.enabled", True)
+        if not self.rotation_store.load().is_enabled(active, default=default_enabled):
             report.skipped.append((symbol, f"{active} disabled by rotation"))
             return
         intent = self.strategies[active].generate(symbol, feats)
@@ -413,8 +460,6 @@ class Orchestrator:
             open_positions=exposure.open_count,
             gross_exposure_value=exposure.gross_value,
             open_risk_dollars=exposure.open_risk_dollars,
-            is_intraday=False,
-            day_trade_count=account.daytrade_count,
         )
         decision = self.risk.evaluate(gated, acct_state)
         report.decisions.append((symbol, decision.decision.value, decision.approved_qty))

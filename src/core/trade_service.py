@@ -18,10 +18,10 @@ credentials NO.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Callable
 
 from src.common.config import Config, load_config
 from src.common.errors import retry_transient
@@ -98,7 +98,7 @@ class TradeService:
         price_fn: PriceFn | None = None,
         audit: AuditLog | None = None,
         symbol_resolver: SymbolResolver | None = None,
-        lock_path: "str | Path | None" = None,
+        lock_path: str | Path | None = None,
     ) -> None:
         self.broker = broker
         self.config = config or load_config()
@@ -297,7 +297,6 @@ class TradeService:
             buying_power=account.buying_power, last_price=price,
             open_positions=exposure.open_count, gross_exposure_value=exposure.gross_value,
             open_risk_dollars=exposure.open_risk_dollars,
-            is_intraday=False, day_trade_count=account.daytrade_count,
         )
         decision = self.risk.evaluate(intent, acct_state)
         self.audit.record("trade_service_risk", symbol=intent.symbol,

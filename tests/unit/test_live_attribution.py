@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import pytest
 
-from src.common.config import load_config
 from src.common.logging import AuditLog
 from src.common.models import Side
 from src.core.orchestrator import Orchestrator

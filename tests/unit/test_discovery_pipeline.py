@@ -6,7 +6,6 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from src.common.config import load_config
-from src.common.models import Side
 from src.discovery.candidate import SignalContribution
 from src.discovery.pipeline import Account, DiscoveryPipeline
 from src.discovery.scorer import Scorer

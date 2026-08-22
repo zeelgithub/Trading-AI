@@ -14,10 +14,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pandas as pd
-
-from src.common.config import Config
 from congress_copy.models import DisclosedTrade
+from src.common.config import Config
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DISCLOSURES = PROJECT_ROOT / "congress_copy" / "data" / "disclosures.json"

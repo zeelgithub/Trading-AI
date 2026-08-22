@@ -47,6 +47,8 @@ behaviour; secrets only in `.env`.
 ```
 pip install -r requirements.txt
 pytest                                              # offline, no creds
+pytest -m integration tests/integration/            # opt-in: hits REAL Alpaca paper API, needs creds
+python -m scripts.check_config [--config-dir path]  # validate config/*.yaml, no trading logic
 python -m scripts.run_paper [--propose|--execute|--reset]  # one cycle (shadow default)
 python -m scripts.run_discovery [--dry-run]         # rank fresh buy ideas → phone
 python -m scripts.manual_order SYM QTY --stop 10    # risk-gated manual buy
@@ -56,15 +58,19 @@ python -m scripts.run_telegram                      # always-on phone listener
 Autonomous: a scheduled task runs `run_paper --execute` each weekday ~15:45 ET.
 With `approval.require_approval: true` (default) that becomes propose-and-approve
 — it pushes trades to the phone and places nothing until you tap Approve. A
-second daily task runs `run_discovery` to push ranked buy ideas (congress +
-technical by default; news + fundamentals toggle on in `config` →
-`discovery.sources`). Run `scripts.run_telegram` always-on (Windows task "at
-logon, restart on failure") for phone control: view/approve/deny, `/ideas`,
-`/sources`, `/buy`, `/halt`, `/reset`, `/flatten`.
+second daily task runs `run_discovery` to push ranked buy ideas (technical by
+default; congress + news + fundamentals toggle on in `config` →
+`discovery.sources` — congress needs its own disclosure ingestion set up
+first, see `congress_copy/README.md` "Scheduled ingestion"). Run
+`scripts.run_telegram` always-on (restart on failure — Windows Task
+Scheduler or a systemd service, see README "Running continuously") for phone
+control: view/approve/deny, `/ideas`, `/sources`, `/buy`, `/halt`, `/reset`,
+`/flatten`. Each deployment is independent (own `.env`, own `state/`, own
+Telegram allowlist) — this is a single-operator design, not a shared service.
 
 ## Status
 
-Implemented + tested (318 tests). Running autonomously on PAPER; strategies not
+Implemented + tested (406 tests). Running autonomously on PAPER; strategies not
 yet validated. Phone control + propose-and-approve via Telegram (`src/notify/`).
 Autonomous discovery (`src/discovery/`) surfaces ranked buy ideas from
 congress/technical/news/fundamentals → phone Approve/Deny. Details + open gaps in

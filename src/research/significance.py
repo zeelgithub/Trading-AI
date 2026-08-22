@@ -9,6 +9,11 @@ functions answer the first with three independent lenses:
     the true mean return is <= 0 (i.e. there is no edge), with a confidence band.
   * probabilistic_sharpe_ratio -- the probability the true Sharpe exceeds zero,
     correcting for sample size, skew and fat tails (Bailey & Lopez de Prado, 2012).
+    Formula verified 2026-08-21 against the original paper (cross-checked via
+    QuantConnect's reproduction and a López de Prado-credited reference
+    implementation): z = (SR-SR*)*sqrt(n-1) / sqrt(1-skew*SR+((kurt-1)/4)*SR^2),
+    kurtosis RAW (normal=3, matching pandas .kurt()+3 below, not pandas' own
+    excess convention) -- this implementation matches exactly, no bug found.
   * sidak_adjust -- inflate a p-value for the number of strategies tried, so that
     testing many strategies cannot manufacture a false "winner" by luck.
 
@@ -20,7 +25,7 @@ Boundary: pure functions; places orders NO.
 from __future__ import annotations
 
 import math
-from typing import Iterable
+from collections.abc import Iterable
 
 import numpy as np
 import pandas as pd
@@ -36,7 +41,7 @@ def bootstrap_pvalue(returns: Iterable[float], n_resamples: int = 5000, seed: in
     mean return.
     """
     r = np.asarray(list(returns), dtype=float)
-    n = int(len(r))
+    n = len(r)
     if n < 2:
         return {"p_value": 1.0, "ci_low": 0.0, "ci_high": 0.0,
                 "mean_return": float(r.mean()) if n else 0.0, "n": n}
@@ -61,7 +66,7 @@ def probabilistic_sharpe_ratio(returns: Iterable[float], benchmark_sr: float = 0
     >= 0.95 is the usual bar for "the Sharpe is real."
     """
     r = np.asarray(list(returns), dtype=float)
-    n = int(len(r))
+    n = len(r)
     sd = r.std(ddof=1) if n >= 2 else 0.0
     if n < 3 or sd < 1e-12:   # effectively constant returns -> Sharpe undefined
         return 0.0

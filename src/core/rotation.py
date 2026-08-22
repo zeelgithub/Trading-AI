@@ -8,8 +8,13 @@ exactly like a trade proposal.
 
 Two pieces of state:
   * RotationState  -- the APPLIED per-strategy {enabled, weight}, read by the
-    orchestrator to decide which strategies may generate. Absent file => all
-    enabled (so this is a no-op until you approve something).
+    orchestrator to decide which strategies may generate. A strategy with no
+    entry yet falls back to the `default` passed to `is_enabled()` -- callers
+    seed that from config/strategies.yaml's per-strategy `enabled:` flag, so a
+    fresh deployment starts from the shipped defaults (e.g. a strategy your
+    own validation rejected can ship disabled) rather than always-on. Once you
+    `/rotate` a strategy, its explicit entry here overrides that default from
+    then on.
   * RotationProposal -- a PENDING recommendation awaiting approval.
 
 Guardrails are enforced server-side at both propose AND approve time, so an agent
@@ -47,10 +52,10 @@ class RotationState:
     """Applied per-strategy enable/weight. Unknown strategies default to enabled."""
     strategies: dict[str, dict] = field(default_factory=dict)
 
-    def is_enabled(self, strategy: str) -> bool:
+    def is_enabled(self, strategy: str, default: bool = True) -> bool:
         s = self.strategies.get(strategy)
         if s is None:
-            return True
+            return default
         return bool(s.get("enabled", True)) and float(s.get("weight", 1.0)) > 0.0
 
     def weight(self, strategy: str) -> float:
@@ -174,12 +179,18 @@ class RotationService:
         proposal_store: RotationProposalStore | None = None,
         max_weight: float = 1.0,
         expiry_minutes: int = 10080,
+        strategy_defaults: dict[str, bool] | None = None,
     ) -> None:
         self.known = tuple(known_strategies)
         self.state_store = state_store or RotationStateStore()
         self.proposal_store = proposal_store or RotationProposalStore()
         self.max_weight = float(max_weight)
         self.expiry_minutes = int(expiry_minutes)
+        # Same config-seeded defaults used by is_enabled() elsewhere, so a
+        # strategy that ships disabled (no rotation.json entry yet) is
+        # already treated as inactive by the "can't disable the last active
+        # strategy" guardrail below -- not silently counted as enabled.
+        self.defaults = dict(strategy_defaults or {})
 
     def propose(self, action, strategy, *, weight=None, rationale="") -> dict:
         action = str(action).lower().strip()
@@ -237,7 +248,7 @@ class RotationService:
         return True, "ok"
 
     def _resulting_enabled(self, action, strategy, weight, state: RotationState) -> set[str]:
-        enabled = {s for s in self.known if state.is_enabled(s)}
+        enabled = {s for s in self.known if state.is_enabled(s, default=self.defaults.get(s, True))}
         if action == "disable" or (action == "reweight" and (_coerce_weight(weight) or 0.0) <= 0.0):
             enabled.discard(strategy)
         elif action == "enable":

@@ -23,7 +23,6 @@ from src.strategy.registry import REGISTRY, build_strategies, register
 from tests.unit.fakes import FakeBroker
 from tests.unit.synth import make_features
 
-
 # --- watchdog ----------------------------------------------------------------
 
 def _et(s: str) -> pd.Timestamp:

@@ -27,6 +27,25 @@ def test_state_defaults_to_enabled(tmp_path):
     assert RotationStateStore(tmp_path / "r.json").load().is_enabled("anything") is True
 
 
+def test_state_absent_entry_falls_back_to_caller_default(tmp_path):
+    # No rotation.json entry for "mean_reversion" -> the caller-supplied
+    # default wins (seeded from config/strategies.yaml's enabled: flag by
+    # the orchestrator/listener), not a hardcoded True.
+    state = RotationStateStore(tmp_path / "r.json").load()
+    assert state.is_enabled("mean_reversion", default=False) is False
+    assert state.is_enabled("mean_reversion", default=True) is True
+
+
+def test_state_explicit_entry_overrides_caller_default(tmp_path):
+    # Once a strategy has been explicitly /rotate'd, that decision wins
+    # regardless of what default a caller passes.
+    s = RotationState()
+    s.apply("enable", "mean_reversion")
+    assert s.is_enabled("mean_reversion", default=False) is True
+    s.apply("disable", "trend_following")
+    assert s.is_enabled("trend_following", default=True) is False
+
+
 def test_state_roundtrip(tmp_path):
     store = RotationStateStore(tmp_path / "r.json")
     s = RotationState()
@@ -72,6 +91,17 @@ def test_cannot_disable_last_active_strategy(tmp_path):
     svc.approve(svc.propose("disable", "mean_reversion")["proposal_id"])
     res = svc.propose("disable", "trend_following")    # only one left
     assert not res["ok"] and "last active" in res["error"]
+
+
+def test_guardrail_counts_config_disabled_strategy_as_already_inactive(tmp_path):
+    # mean_reversion ships disabled by default (config/strategies.yaml); the
+    # guardrail must already treat it as inactive with no explicit rotation
+    # entry, not as a false "still enabled" the last-active check could be
+    # fooled by.
+    svc = service(tmp_path, strategy_defaults={"mean_reversion": False})
+    svc.approve(svc.propose("disable", "breakout")["proposal_id"])
+    res = svc.propose("disable", "trend_following")  # would leave only mean_reversion,
+    assert not res["ok"] and "last active" in res["error"]  # which is already off
 
 
 # --- approve / deny ---

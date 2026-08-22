@@ -24,10 +24,10 @@ Boundary: clears halts only via verified gates; places orders NO.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
 
 from src.common.logging import get_logger
 from src.common.proclock import DEFAULT_LOCK_PATH, BotBusy, bot_lock
@@ -88,7 +88,7 @@ class SelfHealer:
         audit=None,
         now: Callable[[], datetime] | None = None,
         lock_timeout: float = 15.0,
-        lock_path: "str | Path | None" = None,
+        lock_path: str | Path | None = None,
     ) -> None:
         self.halt_store = halt_store or HaltStore()
         # Injectable (like counter_path/halt_store) so tests never contend

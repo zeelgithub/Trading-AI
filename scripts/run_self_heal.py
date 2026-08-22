@@ -6,7 +6,9 @@ Run periodically (e.g. every few minutes from the always-on listener or a task):
   1. Attempt a VERIFIED auto-resume of a whitelisted transient HALT
      (stale_data / disconnect only) -- deterministic, gated, capped.
   2. If the halt is manual-only, or auto-resume is otherwise blocked/escalated,
-     run the anomaly_triage agent and push a diagnosis to the phone.
+     push a paste-into-Claude.ai incident brief to the phone -- plus the
+     anomaly_triage agent's own diagnosis (src/agents/triage.py), best-effort,
+     ONLY when ANTHROPIC_API_KEY is set. No key -> brief only, unchanged.
 
 Never clears reconcile-mismatch or kill-switch halts (those stay manual).
 
@@ -57,6 +59,37 @@ def _broker_reachable() -> bool:
         return False
 
 
+def _try_agent_diagnosis() -> str | None:
+    """Best-effort: if ANTHROPIC_API_KEY is set, get the anomaly_triage
+    agent's read (src/agents/triage.py -- diagnose-and-recommend ONLY, it
+    never clears a halt or places a trade) alongside the deterministic
+    brief. Returns None on a missing key or ANY failure, so escalation is
+    byte-identical to before this existed when no key is configured -- the
+    agent enriches the alert, it is never required for one to go out."""
+    try:
+        from src.common.secrets import load_anthropic_api_key
+
+        load_anthropic_api_key()
+    except Exception:
+        return None  # no key configured -- not an error, just nothing to add
+
+    try:
+        from src.agents.triage import AnomalyTriage
+
+        result = AnomalyTriage().diagnose()
+        if not result.ok or not result.output:
+            return None
+        o = result.output
+        return (
+            f"🤖 Agent diagnosis ({o.get('severity', '?')}): {o.get('diagnosis', '?')}\n"
+            f"Likely cause: {o.get('likely_cause', '?')}\n"
+            f"Recommended: {o.get('recommended_action', '?')}"
+        )
+    except Exception as exc:  # never let an agent failure block the brief
+        log.warning("anomaly_triage failed (falling back to brief only): %s", exc)
+        return None
+
+
 def main() -> None:
     config = load_config()
     notifier = build_notifier(config)
@@ -87,10 +120,15 @@ def main() -> None:
     if not result.escalate:
         return  # transient / cooldown -- will retry on the next tick, no noise
 
-    # Manual-only or capped: push a paste-into-Claude.ai incident brief to the phone.
+    # Manual-only or capped: push a paste-into-Claude.ai incident brief to the phone,
+    # plus the anomaly_triage agent's own read when a Claude key is configured.
     info = HaltStore().halt_info() or {}
-    notifier.alert("incident", incident_brief(info, AuditLog().tail(20)))
-    print("escalated: incident brief sent to phone")
+    brief = incident_brief(info, AuditLog().tail(20))
+    diagnosis = _try_agent_diagnosis()
+    if diagnosis:
+        brief = f"{diagnosis}\n\n{brief}"
+    notifier.alert("incident", brief)
+    print("escalated: incident brief sent to phone" + (" (+ agent diagnosis)" if diagnosis else ""))
 
 
 if __name__ == "__main__":
