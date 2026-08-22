@@ -31,7 +31,7 @@ import argparse
 from src.common.config import load_config
 from src.common.logging import get_logger
 from src.core.state_store import StateStore
-from src.execution.broker_alpaca import AlpacaBroker
+from src.execution.broker_alpaca import build_broker
 from src.execution.order_manager import OrderManager
 from src.execution.reconciler import Reconciler
 
@@ -43,8 +43,8 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true", help="report only; place no orders")
     args = parser.parse_args()
 
-    load_config()
-    broker = AlpacaBroker()
+    config = load_config()
+    broker = build_broker(config)  # no allow_live: this is a paper-only remediation tool
     store = StateStore()
     reconciler = Reconciler(broker)
     om = OrderManager(broker)
