@@ -578,15 +578,25 @@ class Orchestrator:
                     self.audit.record("flatten_error", symbol=symbol, error=str(exc))
         try:
             open_orders = retry_transient(self.broker.list_open_orders)
-        except Exception:  # pragma: no cover
+        except Exception as exc:
+            # Silent here used to mean the cancel loop below never even ran,
+            # with zero trace of it -- during a kill-switch flatten, the one
+            # moment an operator most needs to know "orders may still be
+            # resting at the broker, go check manually."
+            self.audit.record("flatten_list_orders_error", error=str(exc))
+            self.log.warning("flatten: could not list open orders, cannot "
+                              "confirm they're cancelled: %s", exc)
             open_orders = []
         for order in open_orders:
             try:
                 # cancel is idempotent (cancelling twice is a no-op at the
                 # broker), so retrying it during a kill-switch flatten is safe.
                 retry_transient(lambda oid=order.id: self.broker.cancel_order(oid))
-            except Exception:  # pragma: no cover
-                pass
+            except Exception as exc:
+                self.audit.record("flatten_cancel_error", symbol=order.symbol,
+                                  order_id=order.id, error=str(exc))
+                self.log.warning("flatten: could not cancel order %s (%s): %s",
+                                 order.id, order.symbol, exc)
 
     def _exposure(self) -> ExposureSnapshot:
         open_positions = (p for p in self.positions.values() if p.status != PositionStatus.CLOSED)

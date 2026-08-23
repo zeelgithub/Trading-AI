@@ -117,6 +117,50 @@ def test_kill_switch_halts_and_flattens(tmp_path):
     assert "x1" in broker.canceled
 
 
+def test_flatten_records_error_when_listing_open_orders_fails(tmp_path):
+    """Regression guard: _flatten() used to swallow a list_open_orders()
+    failure completely silently -- during a kill-switch flatten, the one
+    moment an operator most needs a trace that orders might still be
+    resting at the broker."""
+    class _ListFailsBroker(FakeBroker):
+        """Reconciler.reconcile() also calls list_open_orders() earlier in the
+        cycle -- only the SECOND call (inside _flatten, after the kill switch
+        has already tripped) should fail, or the whole cycle halts on a
+        generic reconcile error before ever reaching _flatten."""
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self._list_open_orders_calls = 0
+
+        def list_open_orders(self):
+            self._list_open_orders_calls += 1
+            if self._list_open_orders_calls > 1:
+                raise RuntimeError("broker unreachable")
+            return super().list_open_orders()
+
+    acct = AccountView(equity=45000, last_equity=50000, buying_power=200000)
+    broker = _ListFailsBroker(account=acct, auto_fill=False)
+    report = make_orch(broker, tmp_path, execute=True).run_cycle()
+    assert report.halted and "kill switch" in report.halt_reason
+    events = [e["event"] for e in AuditLog(tmp_path / "audit.jsonl").tail(50)]
+    assert "flatten_list_orders_error" in events
+
+
+def test_flatten_records_error_when_cancel_fails(tmp_path):
+    class _CancelFailsBroker(FakeBroker):
+        def cancel_order(self, order_id):
+            raise RuntimeError("cancel rejected")
+
+    acct = AccountView(equity=45000, last_equity=50000, buying_power=200000)
+    broker = _CancelFailsBroker(account=acct, auto_fill=False)
+    broker.seed_order(OrderView(id="x1", client_order_id="c", symbol="AAPL", qty=1,
+                                side="sell", type="stop", status="accepted", stop_price=90.0))
+    report = make_orch(broker, tmp_path, execute=True).run_cycle()
+    assert report.halted and "kill switch" in report.halt_reason
+    events = [e["event"] for e in AuditLog(tmp_path / "audit.jsonl").tail(50)]
+    assert "flatten_cancel_error" in events
+    assert "x1" not in broker.canceled  # the cancel genuinely failed, not silently "succeeded"
+
+
 def test_live_mode_without_optin_halts(tmp_path):
     base = load_config()
     live_cfg = replace(base, settings={**base.settings, "mode": "live"})
