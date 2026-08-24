@@ -101,21 +101,22 @@ This is the single precision bar `initial_stop_pct`-style tuning applies to; rai
 
 ## Validation status
 
-Updated 2026-08-10 (latest of four re-runs same day — widened history, two
-risk-layer changes, then a survivorship-bias fix + a backtester bug fix; see
-"Recent risk-layer changes" and "Survivorship-bias fix" below).
-`--full-refetch --lookback-days 1500` (~4.1 years, 1029 trading days), 34-symbol
+Updated 2026-08-24 (routine data refresh — see "2026-08-24 re-run" below for
+what changed vs. the 2026-08-10 numbers this replaces; "Recent risk-layer
+changes" and "Survivorship-bias fix" further below are the historical record
+of THAT day's actual logic/risk changes, not this one).
+`--full-refetch --lookback-days 1500` (~4.1 years, 1030 trading days), 34-symbol
 research universe (27 still-listed large caps + 6 real US-equity delistings
 inside the window — see "Survivorship-bias fix") + SPY:
 
 | strategy | trades | win% | PF | p(adj) | verdict |
 |---|---|---|---|---|---|
-| trend_following | 43 | 46.5 | 3.64 | 0.037 | **VALIDATED** |
-| breakout | 186 | 39.2 | 1.70 | 0.054 | INCONCLUSIVE (just above the 0.05 bar) |
+| trend_following | 43 | 46.5 | 3.60 | 0.040 | **VALIDATED** |
+| breakout | 184 | 39.1 | 1.70 | 0.066 | INCONCLUSIVE |
 | mean_reversion | 48 | 37.5 | 0.56 | 1.000 | NOISE — and net-negative (PF < 1); disabled via rotation |
 
-Portfolio (all three combined): +38.5% return, Sharpe 1.30, maxDD -5.4%, 277 trades.
-Buy-and-hold SPY over the same window: +113.5% return, Sharpe 1.24. The strategies
+Portfolio (all three combined): +38.1% return, Sharpe 1.29, maxDD -5.4%, 275 trades.
+Buy-and-hold SPY over the same window: +110.9% return, Sharpe 1.21. The strategies
 underperform on raw return but beat SPY's Sharpe with roughly a third of its
 drawdown — expected, since the risk gate caps exposure (max 10 positions, a
 fraction of budget risked each, further rationed by the aggregate open-risk cap
@@ -186,23 +187,55 @@ given day (fewer breakout trades got through, 203→179; trend_following dropped
 from 50→42 similarly) — not a strategy-logic change. The maxDD improvement
 (-8.3% pre-change → -5.4%) is the aggregate-risk cap doing its job.
 
-Reading:
-- **trend_following** now clears `min_trades=30` with a real, Sidak-adjusted
-  p < 0.05 and the highest profit factor (3.64) of the three — the first strategy
-  in this project with a statistically real edge on backtest data. Still "a floor
-  to clear, not a green light to go live" (below).
-- **breakout** is a genuine borderline case sitting just past the significance
-  threshold — worth more history or live paper-trading data before promoting or
-  dropping it, not more parameter tuning.
-- **mean_reversion** remains net-negative (PF 0.56) across every re-run so far. A
-  real candidate for `/review` → disable via rotation (`state/rotation.json`,
-  human-approved, never automatic) rather than further tuning — already applied:
-  disabled in `state/rotation.json` as of 2026-08-10.
+### 2026-08-24 re-run — routine data refresh, no logic changes
 
-None of this was tuned to look better than it is — no strategy *parameter* was
-touched in any of today's four re-runs; only the history window, two risk-layer
-fixes, the validation universe, and (separately) a backtester bug fix changed,
-and each was made because it was a real gap, not to move these numbers.
+Re-run for one reason only: ~2 more weeks of real trading history accumulated
+since 2026-08-10, and this file says to re-run "periodically to extend the
+window" (below) as that happens. No strategy parameter, no risk-layer setting,
+no config value was touched between the two runs — same `--full-refetch
+--lookback-days 1500`, same 34-symbol universe, same code. Reported honestly,
+in both directions, not just the flattering one:
+
+- **trend_following**: p(adj) moved 0.037 → 0.040 — still comfortably
+  VALIDATED, still the strongest profile of the three, but the two more weeks
+  of data made the margin slightly thinner, not thicker. Worth watching, not
+  acting on.
+- **breakout**: p(adj) moved 0.054 → 0.066 — still INCONCLUSIVE, and further
+  from the 0.05 bar than before, not closer. The "just above the bar"
+  framing from the prior write-up no longer fits; this is now a clearer miss,
+  even though PF (1.70) and trade count (184, barely changed from 186) look
+  almost identical. More history didn't resolve the ambiguity in breakout's
+  favor — an honest re-run doesn't get to assume it will.
+- **mean_reversion**: unchanged (48 trades, PF 0.56, NOISE) — the extra two
+  weeks contributed nothing new to this universe/window combination.
+
+This is exactly what re-running periodically is *for*: two more weeks either
+would have pushed breakout over the bar, confirmed it as noise, or (what
+actually happened) left it genuinely ambiguous with a slightly weaker number.
+All three outcomes are legitimate; only one of them is what showed up, and
+that's the one reported above.
+
+Reading:
+- **trend_following** clears `min_trades=30` with a real, Sidak-adjusted
+  p < 0.05 and the highest profit factor (3.60) of the three — the first
+  strategy in this project with a statistically real edge on backtest data.
+  Still "a floor to clear, not a green light to go live" (below).
+- **breakout** remains a borderline case past the significance threshold —
+  worth more history or live paper-trading data before promoting or dropping
+  it, not more parameter tuning. Two more weeks of data made it marginally
+  LESS convincing, not more — a reason for patience, not for forcing a verdict
+  either direction.
+- **mean_reversion** remains net-negative (PF 0.56) across every re-run so far,
+  now including this one. A real candidate for `/review` → disable via
+  rotation (`state/rotation.json`, human-approved, never automatic) rather
+  than further tuning — already applied: disabled in `state/rotation.json` as
+  of 2026-08-10, unchanged by this re-run.
+
+None of this was tuned to look better than it is — no strategy *parameter* has
+been touched since the 2026-08-10 risk-layer/universe changes described above;
+only the history window moved, in both this re-run and the four on 2026-08-10,
+and each was made because it was time to check the numbers again, not to move
+them.
 
 The one gap the above still doesn't touch: every number above comes from ONE
 in-sample backtest over the whole window — scored, in part, with the same data
@@ -227,35 +260,45 @@ EMA200). A position still open at a fold boundary force-closes there via the
 same "data_end" mechanism from the survivorship-bias fix, so nothing leaks
 across folds.
 
-2026-08-10, 3 folds over the same 4.1-year/34-symbol run above:
+2026-08-24, 3 folds over the same 4.1-year/34-symbol run above (fold boundaries
+shift slightly re-run to re-run since they're computed as equal slices of a
+window that now ends ~2 weeks later; supersedes the 2026-08-10 table this
+replaces):
 
 | fold | window | strategy | trades | win% | PF | p(raw) |
 |---|---|---|---|---|---|---|
-| 1 | 2022-07-05..2023-11-10 | trend_following | 6 | 50.0 | 3.33 | 0.102 |
-| 1 | 2022-07-05..2023-11-10 | breakout | 71 | 36.6 | 1.36 | 0.153 |
-| 1 | 2022-07-05..2023-11-10 | mean_reversion | 20 | 40.0 | 0.63 | 0.878 |
-| 2 | 2023-11-13..2025-03-27 | trend_following | 22 | 50.0 | 1.71 | 0.109 |
-| 2 | 2023-11-13..2025-03-27 | breakout | 70 | 41.4 | 1.46 | 0.123 |
-| 2 | 2023-11-13..2025-03-27 | mean_reversion | 15 | 46.7 | 0.83 | 0.607 |
-| 3 (holdout) | 2025-03-28..2026-08-10 | trend_following | 15 | 46.7 | 6.28 | 0.030 |
-| 3 (holdout) | 2025-03-28..2026-08-10 | breakout | 41 | 31.7 | 2.14 | 0.324 |
-| 3 (holdout) | 2025-03-28..2026-08-10 | mean_reversion | 12 | 16.7 | 0.21 | 0.999 |
+| 1 | 2022-07-05..2023-11-16 | trend_following | 6 | 50.0 | 3.34 | 0.101 |
+| 1 | 2022-07-05..2023-11-16 | breakout | 70 | 41.4 | 1.52 | 0.109 |
+| 1 | 2022-07-05..2023-11-16 | mean_reversion | 20 | 40.0 | 0.63 | 0.878 |
+| 2 | 2023-11-17..2025-04-07 | trend_following | 23 | 43.5 | 1.37 | 0.237 |
+| 2 | 2023-11-17..2025-04-07 | breakout | 76 | 39.5 | 1.35 | 0.114 |
+| 2 | 2023-11-17..2025-04-07 | mean_reversion | 16 | 50.0 | 0.90 | 0.605 |
+| 3 (holdout) | 2025-04-08..2026-08-24 | trend_following | 16 | 43.8 | 6.11 | 0.049 |
+| 3 (holdout) | 2025-04-08..2026-08-24 | breakout | 40 | 30.0 | 2.05 | 0.327 |
+| 3 (holdout) | 2025-04-08..2026-08-24 | mean_reversion | 11 | 18.2 | 0.24 | 0.995 |
 
 Per-fold trade counts are too small for a formal per-fold verdict (that's not
 the point — read PF direction, not p(raw), which is deliberately NOT
 Sidak-adjusted here). Reading:
-- **trend_following**: PF > 1 in all three folds (3.33, 1.71, 6.28), including
+- **trend_following**: PF > 1 in all three folds (3.34, 1.37, 6.11), including
   fold 3 — the only fold entirely outside the ~14-month window the regime
   thresholds were originally tuned against, i.e. the closest thing this project
   has to a genuine out-of-sample holdout. The in-sample VALIDATED verdict is
-  not resting on a period the thresholds were fitted to.
-- **breakout**: also PF > 1 in every fold (1.36, 1.46, 2.14) and, like
-  trend_following, strongest in the holdout fold — consistent with its
-  in-sample INCONCLUSIVE-but-close verdict; worth continued tracking, not
-  promotion or dismissal on this alone.
-- **mean_reversion**: PF < 1 in every fold, and getting WORSE over time (0.63 ->
-  0.83 -> 0.21) — sharper evidence for disabling it than the pooled PF 0.56
-  alone gave. Already disabled via rotation (see above).
+  not resting on a period the thresholds were fitted to. Fold 2's PF eased
+  from 1.71 to 1.37 with two more weeks of data — still comfortably above 1,
+  consistent with the in-sample p-value also thinning slightly (0.037 → 0.040)
+  above.
+- **breakout**: also PF > 1 in every fold (1.52, 1.35, 2.05) — still
+  consistent, directionally, with its in-sample INCONCLUSIVE verdict; worth
+  continued tracking, not promotion or dismissal on this alone. Unlike
+  trend_following, this consistency across folds hasn't translated into the
+  in-sample p-value actually crossing the significance bar even after two
+  more re-runs' worth of data.
+- **mean_reversion**: PF < 1 in every fold (0.63, 0.90, 0.24) — not a clean
+  monotonic decline like the prior table suggested, but the holdout fold
+  (0.24) is by far the weakest, and the pooled PF (0.56) hasn't moved.
+  Sharper evidence for disabling it than the pooled number alone gives.
+  Already disabled via rotation (see above).
 
 `scripts/evaluate_strategies.py` defaults to a wider, sector-diverse validation universe
 (`settings.research.backtest_universe`, 34 symbols, including delisted names — see
@@ -322,13 +365,19 @@ above, formation=126d/skip=21d/bucket=20%):
 
 | trial | trades | win% | PF | p-value | PSR | consistency | verdict |
 |---|---|---|---|---|---|---|---|
-| in-sample | 80 | 51.2 | 3.61 | 0.019 | 1.00 | 1.00 | **VALIDATED** |
+| in-sample | 80 | 52.5 | 3.66 | 0.017 | 1.00 | 1.00 | **VALIDATED** |
 
 | fold | window | trades | win% | PF | p(raw) |
 |---|---|---|---|---|---|
-| 1 | 2022-07-05..2023-11-16 | 13 | 38.5 | 10.37 | 0.056 |
-| 2 | 2023-11-17..2025-04-07 | 42 | 50.0 | 2.07 | 0.278 |
-| 3 (holdout) | 2025-04-08..2026-08-24 | 25 | 60.0 | 3.70 | 0.083 |
+| 1 | 2022-07-05..2023-11-16 | 13 | 38.5 | 10.38 | 0.056 |
+| 2 | 2023-11-17..2025-04-07 | 42 | 52.4 | 2.14 | 0.252 |
+| 3 (holdout) | 2025-04-08..2026-08-24 | 25 | 60.0 | 3.71 | 0.083 |
+
+(Re-run 2026-08-24 alongside the three-strategy re-run above, on the same
+freshly-refetched data — a routine data refresh, not a parameter change;
+numbers moved marginally in momentum's favor this time, e.g. p 0.019→0.017,
+but that direction isn't guaranteed on the next re-run either, same caveat as
+trend_following's own re-run above.)
 
 PF stays above 1 in every fold, including fold 3 — the true out-of-sample
 holdout, entirely outside any window used to pick the 126/21/20% parameters
@@ -354,8 +403,9 @@ weakest.
   `config/risk_limits.yaml`) was added ahead of this write-up specifically so
   the numbers above are scored under the same cap this strategy would face
   live — see docs/SAFEGUARDS.md. It did not change the numbers above
-  (confirmed by instrumenting the real backtest run: the cap evaluated all 80
-  entries, fired on 7, but never actually bound at the current 2.5%
+  (confirmed by instrumenting the real backtest run on the 2026-08-24
+  refreshed data: the cap evaluated all 80 entries, fired on 7, peaking at
+  $938 of correlated risk, but never actually bound at the current 2.5%
   threshold) — which is itself informative: the correlated-cluster scenario
   it exists for is real but rare on this particular universe/window, not a
   false alarm invented to justify the cap.
