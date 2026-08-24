@@ -21,6 +21,20 @@ a great strategy with no controls eventually does not. Config:
   and unrelated to the portfolio-level kill switch — see "hybrid execution" at
   the bottom of `config/risk_limits.yaml`), the realized loss is bounded near
   that percentage rather than scaling unbounded with `max_open_positions`.
+- **Correlation-aware open-risk cap:** the guard above treats every dollar of open
+  risk as independent — true enough for the regime-routed trio, which mostly fire
+  on different symbols at different times, but not for a strategy that can open
+  several positions from the same correlated bucket at once (e.g. cross-sectional
+  momentum buying a whole sector rally). `account.max_correlated_risk_pct`
+  (defaults to `max_open_risk_pct * 0.6`) caps `qty * |entry - stop|` summed over
+  just the open positions correlated (trailing `correlation_lookback_days`-day
+  return correlation ≥ `correlated_risk_threshold`, default 0.6) with a candidate's
+  own symbol, plus the candidate's own risk — enforced at entry time
+  (`RiskManager.evaluate()` step 7.6, `src/risk/correlation.py`). Positions whose
+  correlation can't be computed (missing/short price history) are excluded from
+  this tighter check, not assumed correlated — they still count toward the flat
+  cap above, so nothing silently loses protection; this step only ever tightens
+  further.
 - **Max position / per-symbol exposure** caps.
 - **Max gross exposure / leverage** cap.
 - **Fat-finger band:** reject orders priced > 20% off last quote.

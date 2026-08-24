@@ -24,6 +24,7 @@ import pandas as pd
 from src.common.config import Config, load_config
 from src.common.models import Side
 from src.research.metrics import compute_metrics
+from src.risk.correlation import correlated_open_risk
 from src.risk.exposure import compute_exposure
 from src.risk.ratchet_stop import build_ratchet
 from src.risk.risk_manager import AccountState, RiskManager
@@ -102,10 +103,14 @@ class Backtester:
         self.sentiment = SentimentGate(self.config)
         self.strategies = build_strategies(self.config)
         self.risk = RiskManager(self.config)
-        self.max_open = int(self.config.risk_limits.get("account", {}).get("max_open_positions", 10))
+        acct_limits = self.config.risk_limits.get("account", {})
+        self.max_open = int(acct_limits.get("max_open_positions", 10))
+        self.corr_lookback = int(acct_limits.get("correlation_lookback_days", 60))
+        self.corr_threshold = float(acct_limits.get("correlated_risk_threshold", 0.6))
 
     def run(
         self, features_by_symbol: dict[str, pd.DataFrame], entries_start: object = None,
+        force_strategy: str | None = None,
     ) -> BacktestResult:
         """Run the full event loop. `entries_start`, if given, suppresses NEW
         entries before that date while indicators/exits still see the complete
@@ -113,6 +118,15 @@ class Backtester:
         truncated one. This is what a walk-forward fold uses to keep a
         sub-window's trades isolated without re-deriving indicators per fold
         (see src/research/walkforward.py).
+
+        `force_strategy`, if given, bypasses regime routing entirely and
+        always considers this ONE strategy (must be a key in self.strategies)
+        for every symbol every day -- for isolating a candidate strategy that
+        doesn't fit the trending/ranging/expansion regime model (e.g.
+        cross-sectional momentum, src/strategy/momentum.py) so its own edge
+        can be evaluated cleanly, not mixed into the regime-routed trio's
+        results. None (the default) preserves normal regime-routed behavior
+        exactly.
         """
         # Unified, sorted date index across all symbols.
         all_dates = sorted(set().union(*[df.index for df in features_by_symbol.values()]))
@@ -170,7 +184,8 @@ class Backtester:
                     continue
                 if len(positions) + len(pending) >= self.max_open:
                     break
-                order = self._consider(symbol, df.loc[:today], equity, positions, features_by_symbol, today)
+                order = self._consider(
+                    symbol, df.loc[:today], equity, positions, features_by_symbol, today, force_strategy)
                 if order is not None:
                     pending[symbol] = order
 
@@ -180,10 +195,13 @@ class Backtester:
         return BacktestResult(curve, trades, compute_metrics(curve, trades))
 
     # --- internals ---
-    def _consider(self, symbol, hist, equity, positions, feats_by_sym, today) -> dict | None:
-        active = self.regime.active_strategy(hist)
-        if active is None:
-            return None
+    def _consider(self, symbol, hist, equity, positions, feats_by_sym, today, force_strategy=None) -> dict | None:
+        if force_strategy is not None:
+            active = force_strategy
+        else:
+            active = self.regime.active_strategy(hist)
+            if active is None:
+                return None
         intent = self.strategies[active].generate(symbol, hist)
         if intent is None:
             return None
@@ -199,6 +217,16 @@ class Backtester:
         # from the shared helper like everywhere else.
         gross = self._unrealized(positions, feats_by_sym, today, market_value=True)
         open_risk = compute_exposure(positions.values()).open_risk_dollars
+        # Correlation-aware tightening (RiskManager step 7.6, src/risk/
+        # correlation.py) needs each open position's own closes, truncated to
+        # `today` for causality -- feats_by_sym holds each symbol's FULL
+        # frame, unlike `hist` (already truncated by the caller).
+        closes_by_symbol = {symbol: hist["close"]}
+        for other_symbol in positions:
+            closes_by_symbol[other_symbol] = feats_by_sym[other_symbol].loc[:today, "close"]
+        correlated_risk = correlated_open_risk(
+            symbol, positions.values(), closes_by_symbol,
+            lookback=self.corr_lookback, threshold=self.corr_threshold)
         acct = AccountState(
             equity=equity,
             start_of_day_equity=equity,
@@ -207,6 +235,7 @@ class Backtester:
             open_positions=len(positions),
             gross_exposure_value=gross,
             open_risk_dollars=open_risk,
+            correlated_open_risk_dollars=correlated_risk,
         )
         decision = self.risk.evaluate(gated, acct)
         if decision.approved_qty <= 0:

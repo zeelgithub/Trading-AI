@@ -2,7 +2,9 @@
 
 Three strategies on **daily bars** (swing holds), routed by a **regime filter** so that
 only one strategy trades a given symbol at a time. Equal risk budget across strategies.
-Config: [`config/strategies.yaml`](../config/strategies.yaml).
+Config: [`config/strategies.yaml`](../config/strategies.yaml). A fourth candidate
+(cross-sectional momentum) is under research — not live-wired, not config-registered;
+see "Strategy candidate" below.
 
 ## Regime filter (traffic cop)
 
@@ -265,6 +267,103 @@ extend the window as more live history accumulates:
 
 A "validated" verdict — in-sample or walk-forward — is a floor to clear, not
 authorization to trade live.
+
+## Strategy candidate — Cross-sectional Momentum (research-only, not live-wired)
+
+2026-08-24. Structurally different from the three strategies above:
+`Strategy.generate()`'s signature (`symbol, features`) only ever sees ONE symbol's
+own history — none of the three above can ask "how is this symbol doing relative
+to the rest of the universe today," which is the actual academic definition of
+momentum (Jegadeesh & Titman 1993, "returns to buying winners and selling
+losers"). Rather than change that interface — every live/discovery/backtester
+caller depends on it — the cross-symbol comparison is precomputed as ordinary
+feature columns, upstream of the strategy itself:
+
+- `src/research/cross_sectional.add_cross_sectional_momentum` (offline, pure
+  pandas over already-fetched bars): trailing `lookback`-day return (default
+  126, ~6 months), ending `skip` trading days ago (default 21, ~1 month — the
+  standard fix for short-term reversal contaminating a momentum signal). A
+  symbol is in the "top bucket" on a date if its formation return ranks in the
+  top `top_pct` (default 20%) of all symbols with valid data that date;
+  `momentum_percentile` (0-1) is also kept, for confidence scaling and a
+  symmetric bottom-bucket short leg (the academic "sell losers" side).
+- `src/strategy/momentum.Momentum` then reads those precomputed columns
+  through the EXACT SAME single-symbol `generate(symbol, features)` signature
+  every other strategy uses — zero interface changes, zero live-path changes.
+  **Entry:** fires the day a symbol NEWLY enters its bucket (a transition,
+  not "already in bucket → buy the already-extended move"), confirmed by the
+  same real-bodied confirmation candle every other strategy requires.
+  **Exit:** the moment it falls back OUT of the bucket — mirrors
+  trend_following's opposite-EMA-break design, a pure function of today's
+  state, no remembered entry-time context needed.
+
+**Isolation, by design:** not decorated with `@register`, no block in
+`config/strategies.yaml` — `src/strategy/registry.build_strategies()` (used by
+the live orchestrator, discovery, and the default backtester construction) can
+never instantiate this without an explicit code change. Evaluated only via
+`scripts/research_momentum.py`, which registers it into `REGISTRY` for that
+process's own lifetime and never writes to `config/*.yaml` or touches the
+broker.
+
+**Regime routing doesn't apply:** the three strategies above are mutually
+exclusive per symbol per day, picked by the regime filter. Momentum's edge
+isn't regime-conditional in that sense — evaluating it inside the regime
+router would mix its results into the trio's rather than isolating its own.
+`Backtester.run(..., force_strategy="momentum")` (new — `src/research/
+backtester.py`, also threaded through `evaluate_walk_forward`) bypasses regime
+routing entirely and considers momentum for every symbol every day instead.
+`force_strategy=None` (the default) preserves the regime-routed trio's
+behavior exactly — this had zero effect on any number in "Validation status"
+or "Walk-forward validation" above.
+
+**Results** (`python -m scripts.research_momentum`, same survivorship-bias-
+corrected universe and 1500-day/~4.1-year lookback as the validated study
+above, formation=126d/skip=21d/bucket=20%):
+
+| trial | trades | win% | PF | p-value | PSR | consistency | verdict |
+|---|---|---|---|---|---|---|---|
+| in-sample | 80 | 51.2 | 3.61 | 0.019 | 1.00 | 1.00 | **VALIDATED** |
+
+| fold | window | trades | win% | PF | p(raw) |
+|---|---|---|---|---|---|
+| 1 | 2022-07-05..2023-11-16 | 13 | 38.5 | 10.37 | 0.056 |
+| 2 | 2023-11-17..2025-04-07 | 42 | 50.0 | 2.07 | 0.278 |
+| 3 (holdout) | 2025-04-08..2026-08-24 | 25 | 60.0 | 3.70 | 0.083 |
+
+PF stays above 1 in every fold, including fold 3 — the true out-of-sample
+holdout, entirely outside any window used to pick the 126/21/20% parameters
+(which came from the academic literature, not fit to this data). The holdout
+fold has the highest win rate (60%) of the three, and PF second only to
+fold 1's small-sample spike — if anything the strongest slice, not the
+weakest.
+
+**Caveats — held to the same bar as trend_following, not a lower one:**
+- The p=0.019 above is a STANDALONE trial (n=1) — the script itself prints a
+  note that if this is treated as a 4th trial in the same family as the
+  original 3-strategy study, the honest comparison is Sidak-adjusted for n=4,
+  stricter than what's shown.
+- "Validated" (in-sample or walk-forward) is a floor to clear, not
+  authorization to trade live — see "Walk-forward validation" above. No live
+  or paper-traded fill exists for this candidate at all.
+- Structurally different from the other three in a way the risk layer didn't
+  originally account for: cross-sectional momentum can open several positions
+  from the SAME correlated bucket at once (e.g. a sector rally), which the
+  flat aggregate open-risk cap (step 7.5) treats as independent risk. A
+  correlation-aware tightening (`RiskManager.evaluate()` step 7.6,
+  `src/risk/correlation.py`, `account.max_correlated_risk_pct` in
+  `config/risk_limits.yaml`) was added ahead of this write-up specifically so
+  the numbers above are scored under the same cap this strategy would face
+  live — see docs/SAFEGUARDS.md. It did not change the numbers above
+  (confirmed by instrumenting the real backtest run: the cap evaluated all 80
+  entries, fired on 7, but never actually bound at the current 2.5%
+  threshold) — which is itself informative: the correlated-cluster scenario
+  it exists for is real but rare on this particular universe/window, not a
+  false alarm invented to justify the cap.
+- Not yet promoted: no `@register`, no `config/strategies.yaml` block, and no
+  decision made on how it would coexist with regime routing live (run
+  alongside the trio? replace regime-gating with something else for this one
+  symbol-set?). Promotion is an open decision, not a default next step — the
+  same bar every strategy in this file has been held to.
 
 ## Tested, rejected: two research-backed hypotheses that didn't hold up
 

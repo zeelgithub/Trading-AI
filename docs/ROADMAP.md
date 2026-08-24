@@ -165,6 +165,32 @@ De-risked order of construction. Each step is testable before the next.
   project's own validated decision; `/rotate enable mean_reversion` (or editing
   the yaml, for the next fresh deployment) both still work as the two ways to
   turn it back on.
+- [x] Correlation-aware open-risk cap (2026-08-24, `src/risk/correlation.py`,
+  `RiskManager.evaluate()` step 7.6, `account.max_correlated_risk_pct` /
+  `correlated_risk_threshold` / `correlation_lookback_days` in
+  `config/risk_limits.yaml`) -- added ahead of promoting the cross-sectional
+  momentum candidate below, which (unlike the regime-routed trio) can open
+  several positions from the same correlated bucket at once. The existing
+  step 7.5 aggregate open-risk cap treats every dollar of open risk as
+  independent; this tightens it further for a candidate symbol's correlated
+  cluster specifically. Wired into the two callers where it matters --
+  `src/core/orchestrator.py` (live cycle) and `src/research/backtester.py`
+  (so momentum's own validation run is scored under the same cap it would
+  face live) -- following the exact rollout precedent `open_risk_dollars`
+  set (step 7.5): a new `AccountState.correlated_open_risk_dollars` field,
+  default 0.0 (safe no-op) for `trade_service.py` / `discovery/pipeline.py`,
+  which aren't yet wired to a price-history source and were left alone
+  rather than adding new plumbing beyond this task's scope. Positions whose
+  correlation can't be computed (missing/short history) fall back to the
+  flat step 7.5 cap only, never silently losing protection. New tests:
+  `tests/unit/test_correlation.py` (pure function), 4 new cases in
+  `tests/unit/test_risk_manager.py` (step 7.6 resize/veto/no-op/tighter-
+  than-7.5). Verified against real cached data, not just unit tests:
+  instrumenting `correlated_open_risk` during a momentum backtest run showed
+  it fires correctly (80/80 entry considerations evaluated, 7 found a
+  correlated cluster, max $913 of correlated risk detected) but never
+  actually bound at the current `max_correlated_risk_pct: 2.5` -- a working
+  backstop that simply hadn't been tested by this data yet, not a no-op bug.
 
 ## Agentic orchestrator rebuild (in progress)
 

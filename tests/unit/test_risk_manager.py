@@ -146,6 +146,53 @@ def test_aggregate_open_risk_defaults_to_a_no_op_when_unset():
     assert decision.approved_qty == 46.0
 
 
+def test_correlated_open_risk_resizes_down():
+    """A correlated cluster already risking most of the max_correlated_risk_pct
+    budget (2.5% of 50k = $1250, per config/risk_limits.yaml) shrinks a new
+    trade to whatever room is left, even though the flat aggregate open-risk
+    cap (step 7.5) and max-position cap would otherwise allow more."""
+    rm = RiskManager()
+    acct = base_account(correlated_open_risk_dollars=50000 * 0.025 - 100)  # $100 of room left
+    decision = rm.evaluate(trend_intent(), acct)
+    assert decision.decision == Decision.RESIZE
+    assert decision.approved_qty == 10.0  # $100 room / $10 risk-per-share
+    assert decision.reason.startswith("sized by correlated_open_risk")
+
+
+def test_correlated_open_risk_vetoes_when_no_room():
+    rm = RiskManager()
+    acct = base_account(correlated_open_risk_dollars=50000 * 0.025)  # budget already fully used
+    decision = rm.evaluate(trend_intent(), acct)
+    assert decision.decision == Decision.VETO
+    assert "correlated open-risk" in decision.reason
+
+
+def test_correlated_open_risk_defaults_to_a_no_op_when_unset():
+    """Callers that don't populate correlated_open_risk_dollars (default 0.0)
+    see the exact pre-existing behavior -- this guard never activates by
+    surprise, same convention as open_risk_dollars."""
+    rm = RiskManager()
+    decision = rm.evaluate(trend_intent(), base_account())
+    assert decision.approved_qty == 46.0
+
+
+def test_correlated_open_risk_is_tighter_than_flat_aggregate_cap():
+    """The whole point of step 7.6: a candidate correlated with its open
+    positions can be capped by the TIGHTER correlated budget even when the
+    flat aggregate open-risk budget (step 7.5, 4% of equity) still has room
+    -- both caps see the SAME held risk here, so the tighter one (2.5%) must
+    be what actually binds."""
+    rm = RiskManager()
+    acct = base_account(
+        open_risk_dollars=50000 * 0.025 - 100,             # step 7.5: plenty of room (4% budget)
+        correlated_open_risk_dollars=50000 * 0.025 - 100,  # step 7.6: only $100 of room (2.5% budget)
+    )
+    decision = rm.evaluate(trend_intent(), acct)
+    assert decision.decision == Decision.RESIZE
+    assert decision.approved_qty == 10.0
+    assert decision.reason.startswith("sized by correlated_open_risk")
+
+
 def test_reason_names_whichever_cap_is_tightest_when_both_apply():
     """Aggregate open-risk shrinks to 20 shares, then gross exposure shrinks
     further to 8 -- the LAST (tightest, actually-binding) cap must be the one

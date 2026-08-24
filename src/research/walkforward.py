@@ -92,6 +92,7 @@ def evaluate_walk_forward(
     initial_equity: float = 100_000.0,
     n_bootstrap: int = 5000,
     seed: int = 0,
+    force_strategy: str | None = None,
 ) -> WalkForwardReport:
     config = config or load_config()
     if n_folds < 2:
@@ -114,7 +115,7 @@ def evaluate_walk_forward(
             if not df.loc[:fold_end].empty
         }
         result = Backtester(config=config, initial_equity=initial_equity).run(
-            truncated, entries_start=fold_start,
+            truncated, entries_start=fold_start, force_strategy=force_strategy,
         )
         breakdown = attribution.per_strategy_breakdown(result.trades)
         rets_by_strategy: dict[str, list] = {}

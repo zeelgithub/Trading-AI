@@ -112,3 +112,60 @@ def test_position_still_open_when_data_ends_force_closes_at_last_price():
     assert t.reason == "data_end"
     assert t.exit_price == pytest.approx(125.0)     # last available close
     assert t.exit_date == pd.bdate_range(start="2024-01-02", periods=6)[-1]
+
+
+def _momentum_bucket_transition_frame() -> pd.DataFrame:
+    """No trend/mean-reversion/breakout setup here (flat ADX=20, mid RSI) --
+    regime routing alone would fire nothing. Only momentum_top_bucket's
+    transition + a confirmation candle should produce an entry, and only
+    when force_strategy bypasses regime routing to try it."""
+    rows = [
+        {"open": 100, "high": 100.5, "low": 99.5, "close": 100},
+        {"open": 100, "high": 100.5, "low": 99.5, "close": 100},
+        {"open": 100, "high": 105.5, "low": 99.5, "close": 105,        # SIGNAL: enters top bucket
+         "adx": 20, "rsi": 50},
+        {"open": 105, "high": 106, "low": 104, "close": 105.5},         # FILL @105
+        {"open": 105.5, "high": 106, "low": 90, "close": 92},           # stop-out
+    ]
+    df = make_features(rows)
+    df.index = pd.bdate_range(start="2024-01-02", periods=len(df))
+    df["momentum_top_bucket"] = [False, False, True, True, True]
+    df["momentum_percentile"] = [0.5, 0.5, 0.95, 0.95, 0.95]
+    return df
+
+
+def _config_with_momentum_ratchet():
+    """_fill_entry reads config.risk_limits.ratchet_stop[strategy] with a bare
+    dict[...] (no .get default) -- momentum needs a block there or filling an
+    entry raises KeyError. In-memory only, never touches risk_limits.yaml."""
+    from dataclasses import replace
+
+    from src.common.config import load_config
+
+    base = load_config()
+    return replace(base, risk_limits={
+        **base.risk_limits,
+        "ratchet_stop": {**base.risk_limits.get("ratchet_stop", {}),
+                         "momentum": {"initial_stop_pct": 10.0}},
+    })
+
+
+def test_force_strategy_bypasses_regime_routing():
+    from src.strategy.momentum import Momentum
+
+    config = _config_with_momentum_ratchet()
+    frame = _momentum_bucket_transition_frame()
+
+    # Without force_strategy: regime routing sees ADX=20 (ranging) -> mean_reversion,
+    # which finds no oversold/overbought setup here -> no trade at all.
+    bt = Backtester(config=config, initial_equity=100_000.0, slippage_bps=0.0, commission_per_share=0.0)
+    bt.strategies["momentum"] = Momentum(config)
+    baseline = bt.run({"TEST": frame})
+    assert baseline.trades == []
+
+    bt2 = Backtester(config=config, initial_equity=100_000.0, slippage_bps=0.0, commission_per_share=0.0)
+    bt2.strategies["momentum"] = Momentum(config)
+    forced = bt2.run({"TEST": frame}, force_strategy="momentum")
+    assert len(forced.trades) == 1
+    assert forced.trades[0].strategy == "momentum"
+    assert forced.trades[0].entry_price == pytest.approx(105.0)

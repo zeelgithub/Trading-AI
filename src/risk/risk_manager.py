@@ -36,6 +36,14 @@ class AccountState:
     # stop fired today. Defaults to 0.0 (no-op / not tracked) for callers that
     # don't yet compute it; see RiskManager.evaluate() step 7.5.
     open_risk_dollars: float = 0.0
+    # Subset of the above: open_risk_dollars restricted to positions whose
+    # symbol is correlated (>= correlated_risk_threshold) with THIS intent's
+    # symbol -- computed by the caller via src/risk/correlation.py
+    # (correlation needs price history RiskManager itself never touches; same
+    # precompute-upstream pattern as open_risk_dollars). Defaults to 0.0
+    # (safe no-op) for callers that don't yet compute it; see
+    # RiskManager.evaluate() step 7.6.
+    correlated_open_risk_dollars: float = 0.0
     as_of: date = field(default_factory=date.today)
 
 
@@ -187,6 +195,27 @@ class RiskManager:
             resized = True
         if qty <= 0:
             return _veto(intent, "aggregate open-risk leaves no room for one share")
+
+        # 7.6 Correlation-aware tightening: bound risk-dollars within the
+        # candidate symbol's correlated cluster (open positions correlated
+        # with it, per the caller's src/risk/correlation.py computation) more
+        # tightly than the flat aggregate cap above -- see
+        # config/risk_limits.yaml's max_correlated_risk_pct comment for why.
+        # Defaults to 0.0 (safe no-op) for callers that don't populate
+        # correlated_open_risk_dollars, same convention as step 7.5.
+        max_correlated_risk_pct = float(
+            acct.get("max_correlated_risk_pct", max_open_risk_pct * 0.6))
+        max_correlated_risk_value = account.equity * (max_correlated_risk_pct / 100.0)
+        correlated_room = max_correlated_risk_value - account.correlated_open_risk_dollars
+        if correlated_room <= 0:
+            return _veto(intent, "correlated open-risk limit reached")
+        max_qty_by_correlation = int(correlated_room // risk_per_share) if risk_per_share > 0 else qty
+        if qty > max_qty_by_correlation:
+            qty = max_qty_by_correlation
+            capped_by = "correlated_open_risk"
+            resized = True
+        if qty <= 0:
+            return _veto(intent, "correlated open-risk leaves no room for one share")
 
         # 8. Gross-exposure cap -- shrink to fit, else veto.
         max_gross_pct = float(acct.get("max_gross_exposure_pct", 175.0))

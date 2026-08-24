@@ -44,6 +44,7 @@ from src.execution.order_manager import (
 from src.execution.reconciler import Reconciler
 from src.notify.telegram import NullNotifier
 from src.research.scoreboard import Scoreboard
+from src.risk.correlation import correlated_open_risk
 from src.risk.exposure import ExposureSnapshot, compute_exposure
 from src.risk.ratchet_stop import build_ratchet
 from src.risk.risk_manager import AccountState, RiskManager
@@ -135,6 +136,12 @@ class Orchestrator:
         # Adding a strategy = new module + @register + config; no edits here.
         self.strategies = build_strategies(self.config)
         self.risk = RiskManager(self.config)
+        # Correlation-aware open-risk tightening (RiskManager.evaluate() step
+        # 7.6, src/risk/correlation.py) -- read once here, not per-symbol,
+        # same convention as the other config-driven fields above.
+        acct_limits = self.config.risk_limits.get("account", {})
+        self.corr_lookback = int(acct_limits.get("correlation_lookback_days", 60))
+        self.corr_threshold = float(acct_limits.get("correlated_risk_threshold", 0.6))
         self.order_manager = OrderManager(broker)
         self.reconciler = Reconciler(broker)
         self.state = StateMachine()
@@ -250,12 +257,27 @@ class Orchestrator:
                     self._evaluate_exits(report)
 
                     # Generate / size / (optionally) execute new entries.
+                    open_positions = self._open_positions()
+                    # Precomputed ONCE per cycle (not per candidate symbol) --
+                    # every candidate's correlation check reuses the same
+                    # held-position closes. A symbol whose data errors here is
+                    # just excluded (correlated_open_risk treats "unknown" as
+                    # "not correlated", see src/risk/correlation.py), not a
+                    # cycle-halting failure.
+                    correlation_closes = {}
+                    for held_pos in open_positions:
+                        try:
+                            held_feats = self.feature_provider(held_pos.symbol)
+                        except Exception:
+                            continue
+                        if held_feats is not None and not held_feats.empty:
+                            correlation_closes[held_pos.symbol] = held_feats["close"]
                     for symbol in self.config.enabled_symbols():
                         held = self.positions.get(symbol)
                         if held is not None and held.status != PositionStatus.CLOSED:
                             continue
                         try:
-                            self._consider_entry(symbol, account, report)
+                            self._consider_entry(symbol, account, report, open_positions, correlation_closes)
                         except Exception as exc:  # isolate a bad symbol; count it
                             self.audit.record("symbol_error", symbol=symbol, error=str(exc))
                             report.skipped.append((symbol, f"error: {exc}"))
@@ -418,7 +440,10 @@ class Orchestrator:
                 if not self.risk.breakers.register_error().ok:
                     raise RuntimeError("too many consecutive errors refreshing stops") from exc
 
-    def _consider_entry(self, symbol, account, report: CycleReport) -> None:
+    def _consider_entry(
+        self, symbol, account, report: CycleReport,
+        open_positions: list, correlation_closes: dict,
+    ) -> None:
         feats = self.feature_provider(symbol)
         if feats is None or feats.empty:
             report.skipped.append((symbol, "no data"))
@@ -450,8 +475,12 @@ class Orchestrator:
             report.skipped.append((symbol, "sentiment block"))
             return
 
-        exposure = self._exposure()
+        exposure = compute_exposure(open_positions)
         last_price = float(feats.iloc[-1].close)
+        closes_by_symbol = {**correlation_closes, symbol: feats["close"]}
+        correlated_risk = correlated_open_risk(
+            symbol, open_positions, closes_by_symbol,
+            lookback=self.corr_lookback, threshold=self.corr_threshold)
         acct_state = AccountState(
             equity=account.equity,
             start_of_day_equity=account.last_equity,
@@ -460,6 +489,7 @@ class Orchestrator:
             open_positions=exposure.open_count,
             gross_exposure_value=exposure.gross_value,
             open_risk_dollars=exposure.open_risk_dollars,
+            correlated_open_risk_dollars=correlated_risk,
         )
         decision = self.risk.evaluate(gated, acct_state)
         report.decisions.append((symbol, decision.decision.value, decision.approved_qty))
@@ -599,8 +629,10 @@ class Orchestrator:
                                  order.id, order.symbol, exc)
 
     def _exposure(self) -> ExposureSnapshot:
-        open_positions = (p for p in self.positions.values() if p.status != PositionStatus.CLOSED)
-        return compute_exposure(open_positions)
+        return compute_exposure(self._open_positions())
+
+    def _open_positions(self) -> list:
+        return [p for p in self.positions.values() if p.status != PositionStatus.CLOSED]
 
     def _default_feature_provider(self) -> FeatureProvider:
         from src.data.ingest import live_feature_provider
