@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from src.data.news_sentiment import headline_tone
 from src.data.providers.news import NewsProvider
 from src.discovery.candidate import SignalContribution
+from src.discovery.sources._util import clip_text, fetch_concurrent, safe_call
 
 
 @dataclass
@@ -32,18 +33,22 @@ class NewsSource:
     days: int = 7
     limit: int = 50
     name: str = "news"
+    max_workers: int = 16
 
     def gather(self) -> list[SignalContribution]:
-        out: list[SignalContribution] = []
-        for symbol in dict.fromkeys(s.upper() for s in self.universe):
-            try:
-                headlines = self.provider.fetch_headlines(symbol, days=self.days, limit=self.limit)
-            except Exception:
-                continue
-            contribution = _score_symbol(symbol, headlines, self.name, self.days)
-            if contribution is not None:
-                out.append(contribution)
-        return out
+        """Threaded across the universe -- one HTTP round-trip per symbol
+        otherwise, which at this project's current ~4,000-symbol discovery
+        universe adds up even on Alpaca's comparatively fast News API (see
+        FundamentalsSource.gather()'s docstring for the yfinance case that
+        motivated this same fix). Per-symbol failures still fail soft."""
+        symbols = list(dict.fromkeys(s.upper() for s in self.universe))
+        return fetch_concurrent(symbols, self._fetch_one, max_workers=self.max_workers)
+
+    def _fetch_one(self, symbol: str) -> SignalContribution | None:
+        headlines = safe_call(self.provider.fetch_headlines, symbol, days=self.days, limit=self.limit)
+        if headlines is None:
+            return None
+        return _score_symbol(symbol, headlines, self.name, self.days)
 
 
 def _score_symbol(symbol, headlines, source_name, days) -> SignalContribution | None:
@@ -65,11 +70,6 @@ def _score_symbol(symbol, headlines, source_name, days) -> SignalContribution | 
     score = min(1.0, 0.4 + 0.4 * net_ratio + 0.2 * min(pos, 3) / 3)
     reason = f"News: {pos} positive headline{'s' if pos != 1 else ''} in {days}d"
     if example:
-        reason += f" (e.g. “{_clip(example)}”)"
+        reason += f" (e.g. “{clip_text(example)}”)"
     return SignalContribution(symbol=symbol, source=source_name, score=score, reason=reason,
                               meta={"positive": pos, "negative": neg})
-
-
-def _clip(text: str, n: int = 60) -> str:
-    text = text.strip()
-    return text if len(text) <= n else text[: n - 1] + "…"

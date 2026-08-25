@@ -123,6 +123,33 @@ def load_notification_credentials() -> NotificationCredentials:
     )
 
 
+@dataclass(frozen=True)
+class RedditCredentials:
+    """App-only (client_credentials) OAuth creds for read-only public Reddit
+    listings -- no Reddit account password involved, no write scope
+    requested. Used by the discovery layer's social-buzz source only; holds
+    NO trading credentials."""
+
+    client_id: str = field(repr=False)
+    client_secret: str = field(repr=False)
+    user_agent: str = "discovery-social-buzz/1.0"
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.client_id and self.client_secret)
+
+
+def load_reddit_credentials() -> RedditCredentials:
+    """Returns an unconfigured (empty) object if unset, so callers can no-op
+    cleanly -- same posture as load_notification_credentials()."""
+    _ensure_env_loaded()
+    return RedditCredentials(
+        client_id=os.environ.get("REDDIT_CLIENT_ID", ""),
+        client_secret=os.environ.get("REDDIT_CLIENT_SECRET", ""),
+        user_agent=os.environ.get("REDDIT_USER_AGENT", "discovery-social-buzz/1.0"),
+    )
+
+
 def load_anthropic_api_key() -> str:
     """Claude API key for the cognitive-plane agents and research summarizers.
     This is an AI credential, NOT a trading credential -- a holder of it can

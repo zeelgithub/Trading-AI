@@ -7,7 +7,7 @@ Autonomous paper-trading bot for US equities on Alpaca (daily-swing). The decisi
 path only reaches the broker through a risk gate that can veto a trade but never
 originate one.
 
-> **Status:** running autonomously on paper (no live money). 406 tests pass offline.
+> **Status:** running autonomously on paper (no live money). 563 tests pass offline.
 > Strategies are backtested and scored for statistical significance — one is
 > validated, none has a live track record yet. See [docs/ROADMAP.md](docs/ROADMAP.md).
 
@@ -47,7 +47,14 @@ originate one.
 - **Phone control via Telegram** — view positions, get alerts, and approve or deny
   every trade before it reaches the broker.
 - **Idea discovery** — ranks buy candidates from congressional disclosures,
-  technical setups, news, and fundamentals into approve/deny suggestions.
+  technical setups, news, fundamentals, a volatility re-ranker, and a Reddit
+  $TICKER-mention buzz source (off until you set up a free Reddit API app),
+  across a ~4,000-symbol universe (watchlist + S&P 500/400/600 + data-derived
+  small/micro-cap and volatile-stock screens), into approve/deny
+  suggestions. `discovery.min_price` is configurable but currently **0** —
+  there is no penny-stock price floor in this deployment (a deliberate,
+  disclosed 2026-08-24 choice; see docs/SAFEGUARDS.md for the gap-risk
+  tradeoff that comes with it).
 - **Self-healing** — a deterministic, whitelisted auto-resume for stale-data/
   disconnect halts only; a kill-switch or reconciliation halt always needs you.
 
@@ -135,6 +142,18 @@ For hands-off operation, schedule these:
 | `python -m scripts.run_paper --execute` | weekdays, ~15:45 ET | decision cycle → proposes trades (or places them if `approval.require_approval: false`) |
 | `python -m scripts.run_discovery` | weekdays, ~15:45 ET | ranks fresh buy ideas → pushes suggestions to your phone |
 | `python -m scripts.run_self_heal` | every few minutes (optional) | auto-resumes stale-data/disconnect halts only; escalates everything else |
+| `python -m scripts.build_smallcap_universe` | monthly (optional) | regenerates `src/discovery/smallcap.py`'s data-derived screen instead of leaving it a manual, easy-to-forget step |
+| `python -m scripts.build_volatile_universe` | monthly (optional) | regenerates `src/discovery/volatile.py`'s data-derived screen, same reasoning |
+
+The last two are offline research tools, not part of the trading path — skip
+them entirely and `run_discovery` still works fine off whatever's currently
+checked in; a `universe_stale` Telegram alert fires instead once any enabled
+static list (`discovery.universe.sp500/sp400/sp600/smallcap/volatile`) passes
+`discovery.universe.max_staleness_days` (`config/settings.yaml`, default 45d)
+without being regenerated — see `src/discovery/freshness.py`. `sp500.py`/
+`sp400.py`/`sp600.py` have no generator script at all yet (they were a one-time
+Wikipedia scrape, see `src/discovery/sp500.py`'s docstring); the staleness
+alert is their only safety net today.
 
 Nothing here places an order without passing the risk gate first, and with
 `approval.require_approval: true` (the default) nothing reaches the broker
@@ -158,6 +177,9 @@ timezone or set `TZ=America/New_York` on the cron lines themselves:
 45 15 * * 1-5 cd /path/to/Claude-livetradingbot && .venv/bin/python -m scripts.run_paper --execute >> logs/cron.log 2>&1
 45 15 * * 1-5 cd /path/to/Claude-livetradingbot && .venv/bin/python -m scripts.run_discovery >> logs/cron.log 2>&1
 */5 * * * *   cd /path/to/Claude-livetradingbot && .venv/bin/python -m scripts.run_self_heal >> logs/cron.log 2>&1
+# optional, monthly: regenerate the data-derived universe screens instead of a manual re-run
+0 6 1 * *     cd /path/to/Claude-livetradingbot && .venv/bin/python -m scripts.build_smallcap_universe >> logs/cron.log 2>&1
+0 6 1 * *     cd /path/to/Claude-livetradingbot && .venv/bin/python -m scripts.build_volatile_universe >> logs/cron.log 2>&1
 ```
 
 ```ini

@@ -14,6 +14,7 @@ from src.core.orchestrator import Orchestrator
 from src.core.state_store import HaltStore, StateStore
 from src.execution.broker_alpaca import AccountView, OrderView, PositionView
 from src.execution.order_manager import ManagedPosition, PositionStatus
+from src.research.equity_history import EquityHistory
 from src.research.scoreboard import Scoreboard
 from src.risk.ratchet_stop import PercentRatchet
 from tests.unit.fakes import FakeBroker
@@ -55,7 +56,8 @@ def make_orch(broker, tmp_path, execute=False, halt_store=None, feature_provider
         state_store=StateStore(tmp_path / "positions.json"),
         halt_store=halt_store or HaltStore(tmp_path / "halt.json"),
         audit=AuditLog(tmp_path / "audit.jsonl"),
-        scoreboard=Scoreboard(tmp_path / "scoreboard.json"), **kw,
+        scoreboard=Scoreboard(tmp_path / "scoreboard.json"),
+        equity_history=EquityHistory(tmp_path / "equity_history.json"), **kw,
     )
 
 
@@ -115,6 +117,38 @@ def test_kill_switch_halts_and_flattens(tmp_path):
     report = make_orch(broker, tmp_path, execute=True).run_cycle()
     assert report.halted and "kill switch" in report.halt_reason
     assert "x1" in broker.canceled
+
+
+def test_successful_cycle_records_an_equity_history_point(tmp_path):
+    """The daily track record this exists for: a clean cycle logs today's
+    equity and day P&L, not just today's trade decisions."""
+    acct = AccountView(equity=51000, last_equity=50000, buying_power=200000)
+    broker = FakeBroker(account=acct, market_open=False)
+    report = make_orch(broker, tmp_path, execute=True).run_cycle()
+    assert not report.halted
+    points = EquityHistory(tmp_path / "equity_history.json").load()
+    assert len(points) == 1
+    assert points[0].equity == 51000
+    assert points[0].day_pnl == 1000  # 51000 - 50000
+    assert points[0].halted is False
+
+
+def test_kill_switch_halt_records_a_halted_equity_history_point(tmp_path):
+    """A bad day shows up in the track record as clearly as a good one --
+    the whole point of tracking is seeing how the system behaves under
+    stress, not just the clean days."""
+    acct = AccountView(equity=45000, last_equity=50000, buying_power=200000)
+    broker = FakeBroker(account=acct, auto_fill=False)
+    broker.seed_order(OrderView(id="x1", client_order_id="c", symbol="AAPL", qty=1,
+                                side="sell", type="stop", status="accepted", stop_price=90.0))
+    report = make_orch(broker, tmp_path, execute=True).run_cycle()
+    assert report.halted
+
+    points = EquityHistory(tmp_path / "equity_history.json").load()
+    assert len(points) == 1
+    assert points[0].equity == 45000
+    assert points[0].halted is True
+    assert "kill switch" in points[0].halt_reason
 
 
 def test_flatten_records_error_when_listing_open_orders_fails(tmp_path):
@@ -189,6 +223,7 @@ def test_per_symbol_error_is_isolated(tmp_path):
         broker=FakeBroker(), feature_provider=provider, execute=False,
         state_store=StateStore(tmp_path / "p.json"),
         halt_store=HaltStore(tmp_path / "h.json"), audit=AuditLog(tmp_path / "a.jsonl"),
+        equity_history=EquityHistory(tmp_path / "eq.json"),
     )
     report = orch.run_cycle()
     assert not report.halted
@@ -230,6 +265,7 @@ def test_opposite_ema_exit_closes_position(tmp_path):
         state_store=StateStore(tmp_path / "p.json"),
         halt_store=HaltStore(tmp_path / "h.json"), audit=AuditLog(tmp_path / "a.jsonl"),
         scoreboard=Scoreboard(tmp_path / "sb.json"),
+        equity_history=EquityHistory(tmp_path / "eq.json"),
     )
     orch.positions = {
         "AAPL": ManagedPosition(
@@ -260,6 +296,7 @@ def _seed_open_position_with_stop(tmp_path, execute: bool):
         state_store=StateStore(tmp_path / "p.json"),
         halt_store=HaltStore(tmp_path / "h.json"), audit=AuditLog(tmp_path / "a.jsonl"),
         scoreboard=Scoreboard(tmp_path / "sb.json"),
+        equity_history=EquityHistory(tmp_path / "eq.json"),
     )
     orch.positions = {
         "AAPL": ManagedPosition(
@@ -298,17 +335,18 @@ def test_refresh_stale_stop_skipped_in_shadow_mode(tmp_path):
     assert broker.replaced == []
 
 
-def _seed_auto_closed_position(tmp_path, stop_order: OrderView, notifier):
+def _seed_auto_closed_position(tmp_path, stop_order: OrderView, notifier, execute: bool = True, propose: bool = False):
     """A position the bot thinks is OPEN, but is gone from the broker with no
     open orders left for it -- reconciler flags this `auto_closed` (stop fired
     or an external/manual close)."""
     broker = FakeBroker(positions=[], auto_fill=False)
     broker.seed_order(stop_order)
     orch = Orchestrator(
-        broker=broker, feature_provider=exit_frame, execute=True, notifier=notifier,
+        broker=broker, feature_provider=exit_frame, execute=execute, propose=propose, notifier=notifier,
         state_store=StateStore(tmp_path / "p.json"),
         halt_store=HaltStore(tmp_path / "h.json"), audit=AuditLog(tmp_path / "a.jsonl"),
         scoreboard=Scoreboard(tmp_path / "sb.json"),
+        equity_history=EquityHistory(tmp_path / "eq.json"),
     )
     orch.positions = {
         "AAPL": ManagedPosition(
@@ -360,3 +398,26 @@ def test_auto_close_without_real_fill_price_falls_back_quietly(tmp_path):
     sb = Scoreboard(tmp_path / "sb.json").load()
     # Falls back to the stop level: (90 - 100) * 50 = -500.
     assert sb["trend_following"].live_total_pnl == pytest.approx(-500.0)
+
+
+def test_propose_mode_auto_close_persists_to_disk(tmp_path):
+    """Regression: a propose-mode cycle that reconciles a position as gone
+    from the broker must still persist that closure to state/positions.json.
+    Previously run_cycle() only called store.save() when self.execute was
+    True -- a propose (or shadow) cycle would mark the in-memory position
+    CLOSED and write the `auto_closed` audit event for that one cycle, then
+    silently discard both the moment the process exited, leaving the state
+    file (and anything reading it, e.g. TradeService.status()) claiming a
+    closed position was still open indefinitely. This is exactly the mode
+    the real scheduled task runs in (`run_paper --propose`)."""
+    stop = OrderView(id="s1", client_order_id="c", symbol="AAPL", qty=50, side="sell",
+                     type="stop", status="filled", stop_price=90.0, filled_avg_price=90.0)
+    notifier = _CapturingNotifier()
+    orch = _seed_auto_closed_position(tmp_path, stop, notifier, execute=False, propose=True)
+
+    report = orch.run_cycle()
+
+    assert not report.halted
+    assert orch.positions["AAPL"].status == PositionStatus.CLOSED
+    persisted = StateStore(tmp_path / "p.json").load()
+    assert persisted["AAPL"].status == PositionStatus.CLOSED

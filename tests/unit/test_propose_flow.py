@@ -7,6 +7,7 @@ from src.core.orchestrator import Orchestrator
 from src.core.state_store import HaltStore, StateStore
 from src.core.trade_service import TradeService
 from src.execution.order_manager import PositionStatus
+from src.research.equity_history import EquityHistory
 from tests.unit.fakes import FakeBroker
 from tests.unit.synth import make_features, small_universe_config
 
@@ -29,7 +30,8 @@ def make_orch(broker, tmp_path, **kw):
         broker=broker, feature_provider=trending_long, propose=True,
         state_store=StateStore(tmp_path / "p.json"),
         halt_store=HaltStore(tmp_path / "h.json"),
-        audit=AuditLog(tmp_path / "a.jsonl"), **kw,
+        audit=AuditLog(tmp_path / "a.jsonl"),
+        equity_history=EquityHistory(tmp_path / "eq.json"), **kw,
     )
 
 

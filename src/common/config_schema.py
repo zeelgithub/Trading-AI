@@ -167,6 +167,85 @@ class ExecutionSettings(_Lenient):
     stop_refresh_min_days_remaining: int = Field(15, gt=0, lt=90)
 
 
+class DiscoveryCongressSettings(_Lenient):
+    politicians: list[str] = Field(default_factory=list)
+    max_disclosure_age_days: int = Field(45, gt=0)
+    default_stop_pct: float = Field(10.0, gt=0, le=100)
+
+
+class DiscoveryNewsSettings(_Lenient):
+    lookback_days: int = Field(7, gt=0)
+
+
+class DiscoverySocialSettings(_Lenient):
+    subreddits: list[str] = Field(default_factory=lambda: ["wallstreetbets", "stocks"])
+    limit_per_subreddit: int = Field(100, gt=0)
+
+
+class DiscoveryUniverseSettings(_Lenient):
+    extra: list[str] = Field(default_factory=list)
+    sp500: bool = False
+    sp400: bool = False
+    sp600: bool = False
+    smallcap: bool = False
+    volatile: bool = False
+    # Each static list (sp500.py etc.) carries its own SOURCED_DATE but
+    # nothing read it before src/discovery/freshness.py -- this is the
+    # alert threshold that module checks against.
+    max_staleness_days: int = Field(45, gt=0)
+
+
+class DiscoverySettings(_Lenient):
+    """discovery.* had NO schema at all before this -- every other
+    settings.yaml section does. `sources`/`weights` are kept as open
+    dict[str, ...] (not per-source fields) so the single source of truth for
+    "what sources exist" stays src/discovery/candidate.SOURCES /
+    sources/registry.py, not a third hand-copied list here; the
+    model_validator below checks their KEYS against that list instead."""
+
+    top_n: int = Field(4, gt=0)
+    min_score: float = Field(25.0, ge=0, le=100)
+    min_price: float = Field(5.0, ge=0)
+    # Bounds how long DiscoveryPipeline._gather() waits on any one source
+    # (see pipeline.py) -- what makes a throttled source (the documented
+    # `fundamentals` yfinance case) fail soft on time instead of blowing out
+    # the whole daily schedule.
+    source_timeout_seconds: float = Field(300.0, gt=0)
+    sources: dict[str, bool] = Field(default_factory=dict)
+    weights: dict[str, float] = Field(default_factory=dict)
+    congress: DiscoveryCongressSettings = Field(default_factory=DiscoveryCongressSettings)
+    news: DiscoveryNewsSettings = Field(default_factory=DiscoveryNewsSettings)
+    social: DiscoverySocialSettings = Field(default_factory=DiscoverySocialSettings)
+    universe: DiscoveryUniverseSettings = Field(default_factory=DiscoveryUniverseSettings)
+
+    @model_validator(mode="after")
+    def _sources_and_weights_keys_are_known(self) -> DiscoverySettings:
+        # Lazy, function-local: src/common is foundational and must not
+        # import src/discovery at module load (discovery already imports
+        # src.common.config, so a module-level import here would invert that
+        # layering and risk a circular import). This validator only runs at
+        # config-load time, well after both packages are fully importable.
+        from src.discovery.candidate import SOURCES
+
+        known = set(SOURCES)
+        bad_sources = set(self.sources) - known
+        bad_weights = set(self.weights) - known
+        if bad_sources:
+            raise ValueError(
+                f"discovery.sources has unknown key(s) {sorted(bad_sources)} "
+                f"(known sources: {sorted(known)}) -- a typo here was previously "
+                f"silently ignored at runtime, not an error"
+            )
+        if bad_weights:
+            raise ValueError(
+                f"discovery.weights has unknown key(s) {sorted(bad_weights)} "
+                f"(known sources: {sorted(known)}) -- a typo here was previously "
+                f"silently ignored at runtime (Scorer never reads an unknown "
+                f"weight key), not an error"
+            )
+        return self
+
+
 class SettingsSchema(_Lenient):
     mode: Literal["paper", "live"] = "paper"
     data: DataSettings = Field(default_factory=DataSettings)
@@ -179,6 +258,7 @@ class SettingsSchema(_Lenient):
     self_heal: SelfHealSettings = Field(default_factory=SelfHealSettings)
     concurrency: ConcurrencySettings = Field(default_factory=ConcurrencySettings)
     execution: ExecutionSettings = Field(default_factory=ExecutionSettings)
+    discovery: DiscoverySettings = Field(default_factory=DiscoverySettings)
 
 
 # --- strategies.yaml ------------------------------------------------------

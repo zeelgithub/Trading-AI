@@ -43,6 +43,7 @@ from src.execution.order_manager import (
 )
 from src.execution.reconciler import Reconciler
 from src.notify.telegram import NullNotifier
+from src.research.equity_history import EquityHistory
 from src.research.scoreboard import Scoreboard
 from src.risk.correlation import correlated_open_risk
 from src.risk.exposure import ExposureSnapshot, compute_exposure
@@ -99,6 +100,7 @@ class Orchestrator:
         notifier=None,
         rotation_store: RotationStateStore | None = None,
         scoreboard: Scoreboard | None = None,
+        equity_history: EquityHistory | None = None,
         lock_path=None,
     ) -> None:
         self.config = config or load_config()
@@ -157,6 +159,8 @@ class Orchestrator:
         # Live per-strategy attribution: realized PnL of real closes feeds the
         # scoreboard, so its "live" columns reflect reality, not just backtests.
         self.scoreboard = scoreboard or Scoreboard()
+        # One row per calendar date -- see src/research/equity_history.py.
+        self.equity_history = equity_history or EquityHistory()
 
         # A HALT persisted by a prior (cold) run blocks trading until manual reset.
         persisted_halt = self.halt_store.is_halted()
@@ -178,6 +182,10 @@ class Orchestrator:
                        HaltClass.CONFIG)
             return report
 
+        # Defined here (not inside the try) so the exception handler below can
+        # safely reference it even if the account fetch itself is what failed
+        # -- None means "no equity to record for this cycle", not a crash.
+        account = None
         try:
             # The always-on listener (phone actions) and this scheduled cycle
             # both read-modify-write state/positions.json and halt.json; hold
@@ -220,7 +228,7 @@ class Orchestrator:
                 if not rec.ok:
                     self.audit.record("reconcile_mismatch", detail=rec.summary())
                     self._halt(report, f"reconcile mismatch: {rec.summary()}",
-                               HaltClass.RECONCILE_MISMATCH)
+                               HaltClass.RECONCILE_MISMATCH, account=account)
                     return report
                 report.reconciled = True
 
@@ -230,7 +238,7 @@ class Orchestrator:
                     self.audit.record("kill_switch", detail=ks.reason)
                     if self.execute:
                         self._flatten()
-                    self._halt(report, f"kill switch: {ks.reason}", HaltClass.KILL_SWITCH)
+                    self._halt(report, f"kill switch: {ks.reason}", HaltClass.KILL_SWITCH, account=account)
                     return report
 
                 market_open = retry_transient(self.broker.is_market_open)
@@ -290,14 +298,44 @@ class Orchestrator:
                         self.audit.record("stale_data", detail=str(report.stale))
                         self._halt(report,
                                    f"stale data on all {report.data_checked} checked symbol(s): "
-                                   f"{report.stale}", HaltClass.STALE_DATA)
+                                   f"{report.stale}", HaltClass.STALE_DATA, account=account)
                         return report
 
-                if self.execute:
-                    self.store.save(self.positions)
+                # Persist unconditionally -- NOT execute-gated. self.positions
+                # only ever gains a genuinely NEW entry via _open(), which is
+                # already execute-only (propose mode calls _propose() instead,
+                # never touching self.positions), so there is no risk of
+                # persisting a speculative/unopened position here. But
+                # reconcile-driven auto-closes (above) and _raise_stops'
+                # shadow ratchet trail DO mutate self.positions in every mode,
+                # and previously only survived past this single process's
+                # exit when self.execute was True -- a propose/shadow cycle
+                # that found a position gone from the broker would correctly
+                # audit-log "auto_closed" and mark it CLOSED in memory, then
+                # silently discard that fact when the process exited,
+                # leaving state/positions.json (and anything that reads it,
+                # e.g. TradeService.status()) claiming a closed position was
+                # still open indefinitely. Found live: META auto-closed
+                # 2026-08-24 per logs/audit.jsonl, but state/positions.json
+                # still listed it open two days later because that day's
+                # scheduled cycle ran in --propose mode.
+                self.store.save(self.positions)
                 self.risk.breakers.reset_errors()
                 self.state.to(State.IDLE)
                 report.state = self.state.state.value
+                # One row per day in the equity/P&L track record -- see
+                # src/research/equity_history.py. Same "observability must
+                # never block a real cycle" posture as the audit log: a
+                # failure here is logged, not raised.
+                try:
+                    self.equity_history.record(
+                        equity=account.equity,
+                        day_pnl=account.equity - account.last_equity,
+                        open_positions=len(self._open_positions()),
+                        halted=False,
+                    )
+                except Exception as exc:  # pragma: no cover - observability only
+                    self.log.warning("equity history record failed: %s", exc)
                 # Ops heartbeat: lets the watchdog / MCP ops view answer "did the
                 # last cycle actually run, and what did it do?"
                 self.audit.record(
@@ -321,16 +359,20 @@ class Orchestrator:
 
         except Exception as exc:  # any unhandled error -> halt, never keep trading
             self.audit.record("cycle_exception", error=str(exc))
-            if self.execute:
-                try:
-                    self.store.save(self.positions)
-                except Exception:  # pragma: no cover - best-effort persist
-                    pass
+            # Persist unconditionally, same reasoning as the success path above
+            # -- previously execute-gated, which meant a propose/shadow cycle
+            # that crashed after a real state mutation (e.g. an auto-close
+            # during reconcile) silently lost it, same bug class as the fix
+            # documented above.
+            try:
+                self.store.save(self.positions)
+            except Exception:  # pragma: no cover - best-effort persist
+                pass
             # Connectivity faults halt as DISCONNECT so the verified self-healer
             # may resume them; logic errors stay EXCEPTION (manual reset only).
             halt_class = (HaltClass.DISCONNECT if is_transient_error(exc)
                           else HaltClass.EXCEPTION)
-            self._halt(report, f"cycle exception: {exc}", halt_class)
+            self._halt(report, f"cycle exception: {exc}", halt_class, account=account)
             return report
 
     def reset(self) -> None:
@@ -589,7 +631,7 @@ class Orchestrator:
             self.log.warning("attribution record failed for %s: %s", pos.symbol, exc)
 
     def _halt(self, report: CycleReport, reason: str,
-              halt_class: str = HaltClass.UNKNOWN) -> None:
+              halt_class: str = HaltClass.UNKNOWN, account=None) -> None:
         self.state.halt(reason)
         self.halt_store.set(reason, halt_class)  # persist across cold runs -> no self-resume
         report.halted = True
@@ -598,6 +640,22 @@ class Orchestrator:
         report.state = self.state.state.value
         self.log.error("HALT: %s", reason)
         self._notify("halt", reason)
+        # A halt is a real day in the equity history too -- if the account was
+        # fetched before whatever triggered this, record it as a halted point
+        # rather than leaving a silent gap in the track record. `account` is
+        # None for the two halts that can fire before the broker's ever
+        # called (already-halted skip, live-without-allow_live config guard)
+        # -- nothing to record for those, they didn't run a real cycle.
+        if account is not None:
+            try:
+                self.equity_history.record(
+                    equity=account.equity,
+                    day_pnl=account.equity - account.last_equity,
+                    open_positions=len(self._open_positions()),
+                    halted=True, halt_reason=reason,
+                )
+            except Exception as exc:  # pragma: no cover - observability only, never blocks a halt
+                self.log.warning("equity history record failed during halt: %s", exc)
 
     def _flatten(self) -> None:
         for symbol, pos in list(self.positions.items()):

@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from src.common.jsonio import atomic_write_json, load_json_or_quarantine
+from src.common.jsonio import atomic_write_json, atomic_write_text, load_json_or_quarantine
 from src.common.logging import AuditLog
 from src.common.models import Side
 from src.core import portfolio_view
@@ -18,6 +18,7 @@ from src.data.ingest import last_bar_age_days
 from src.execution.broker_alpaca import OrderView, PositionView
 from src.execution.order_manager import ManagedPosition, PositionStatus
 from src.execution.reconciler import Reconciler
+from src.research.equity_history import EquityHistory
 from src.research.scoreboard import Scoreboard
 from src.risk.ratchet_stop import PercentRatchet
 from tests.unit.fakes import FakeBroker
@@ -31,6 +32,20 @@ def test_atomic_write_and_load_roundtrip(tmp_path):
     payload, quarantined = load_json_or_quarantine(path)
     assert payload == {"a": 1} and quarantined is None
     assert not list(tmp_path.glob("*.tmp"))          # no temp litter
+
+
+def test_atomic_write_text_roundtrip_no_tmp_litter(tmp_path):
+    path = tmp_path / "generated.py"
+    atomic_write_text(path, 'TICKERS = ["AAPL", "MSFT"]\n')
+    assert path.read_text(encoding="utf-8") == 'TICKERS = ["AAPL", "MSFT"]\n'
+    assert not list(tmp_path.glob("*.tmp"))          # no temp litter
+
+
+def test_atomic_write_text_overwrites_existing_file(tmp_path):
+    path = tmp_path / "generated.py"
+    path.write_text("stale content that should not survive\n", encoding="utf-8")
+    atomic_write_text(path, "fresh content\n")
+    assert path.read_text(encoding="utf-8") == "fresh content\n"
 
 
 def test_corrupt_file_is_quarantined_not_trusted(tmp_path):
@@ -120,7 +135,8 @@ def _orch(broker, tmp_path, provider, **kw):
         state_store=StateStore(tmp_path / "positions.json"),
         halt_store=HaltStore(tmp_path / "halt.json"),
         audit=AuditLog(tmp_path / "audit.jsonl"),
-        scoreboard=Scoreboard(tmp_path / "scoreboard.json"), **kw,
+        scoreboard=Scoreboard(tmp_path / "scoreboard.json"),
+        equity_history=EquityHistory(tmp_path / "equity_history.json"), **kw,
     )
 
 

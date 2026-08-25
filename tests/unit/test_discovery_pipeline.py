@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import threading
+import time
 from types import SimpleNamespace
 
 from src.common.config import load_config
@@ -40,14 +42,14 @@ def _held_pos():
                            ratchet=SimpleNamespace(entry=50.0, stop=45.0))
 
 
-def _pipeline(contributions, *, top_n=2, min_score=25.0):
+def _pipeline(contributions, *, top_n=2, min_score=25.0, min_price=5.0, price_fn=None):
     return DiscoveryPipeline(
         sources=[FakeSource(contributions)],
         scorer=Scorer(active_sources=frozenset({"congress", "technical"})),
         risk=RiskManager(load_config()),
         config=load_config(),
-        price_fn=lambda s: 100.0,        # for congress-only candidates
-        top_n=top_n, min_score=min_score,
+        price_fn=price_fn or (lambda s: 100.0),  # for congress-only candidates
+        top_n=top_n, min_score=min_score, min_price=min_price,
     )
 
 
@@ -100,3 +102,228 @@ def test_invalid_stop_is_skipped():
     report = _pipeline([_tech("DDD", 0.8, entry=100.0, stop=100.0)]).run(ACCOUNT, {})
     assert report.proposals == []
     assert any(sym == "DDD" for sym, _ in report.skipped)
+
+
+def test_penny_stock_priced_candidate_is_skipped_below_default_floor():
+    report = _pipeline([_tech("PENNY", 0.8, entry=2.50, stop=2.25)]).run(ACCOUNT, {})
+    assert report.proposals == []
+    reason = next(r for sym, r in report.skipped if sym == "PENNY")
+    assert "min price floor" in reason
+
+
+def test_candidate_right_at_the_floor_is_not_skipped():
+    report = _pipeline([_tech("ATFLOOR", 0.8, entry=5.00, stop=4.50)], min_price=5.0).run(ACCOUNT, {})
+    assert [p.symbol for p in report.proposals] == ["ATFLOOR"]
+
+
+def test_congress_only_candidate_also_respects_the_floor():
+    """The floor is enforced centrally in _size_and_propose(), not per-source
+    -- a congress-only idea priced live below the floor must be skipped too,
+    not just a technical one."""
+    report = _pipeline([_congress("CHEAP", 0.8)], price_fn=lambda s: 3.0).run(ACCOUNT, {})
+    assert report.proposals == []
+    reason = next(r for sym, r in report.skipped if sym == "CHEAP")
+    assert "min price floor" in reason
+
+
+def test_min_price_is_configurable():
+    # A candidate that clears the default $5 floor but not a stricter $10 one.
+    report = _pipeline([_tech("MIDPRICE", 0.8, entry=7.0, stop=6.0)], min_price=10.0).run(ACCOUNT, {})
+    assert report.proposals == []
+    reason = next(r for sym, r in report.skipped if sym == "MIDPRICE")
+    assert "min price floor ($10)" in reason
+
+
+# --- concurrent _gather() (Phase 5: sources run on a thread pool now) -------
+
+class SlowSource:
+    """Blocks past the pipeline's timeout -- simulates a throttled/hung
+    source (the documented `fundamentals` yfinance-throttling scenario)."""
+    name = "slow"
+
+    def __init__(self, delay_seconds):
+        self._delay = delay_seconds
+
+    def gather(self):
+        time.sleep(self._delay)
+        return [_congress("NEVERARRIVES", 0.9)]
+
+
+class FastSource:
+    name = "fast"
+
+    def __init__(self, contributions):
+        self._contributions = contributions
+
+    def gather(self):
+        return list(self._contributions)
+
+
+def test_gather_runs_sources_concurrently_not_sequentially():
+    """Two sources that each sleep 0.3s must together take well under the
+    0.6s a sequential run would need."""
+    class SleepySource:
+        def __init__(self, name, delay):
+            self.name = name
+            self._delay = delay
+
+        def gather(self):
+            time.sleep(self._delay)
+            return []
+
+    pipeline = DiscoveryPipeline(
+        sources=[SleepySource("a", 0.3), SleepySource("b", 0.3)],
+        scorer=Scorer(active_sources=frozenset({"congress", "technical"})),
+        risk=RiskManager(load_config()), config=load_config(),
+        price_fn=lambda s: 100.0, source_timeout_seconds=5.0,
+    )
+    start = time.monotonic()
+    pipeline.run(ACCOUNT, {})
+    elapsed = time.monotonic() - start
+    assert elapsed < 0.55
+
+
+def test_slow_source_times_out_without_blocking_fast_sources():
+    pipeline = DiscoveryPipeline(
+        sources=[SlowSource(delay_seconds=2.0), FastSource([_congress("QUICK", 0.8)])],
+        scorer=Scorer(active_sources=frozenset({"congress", "technical"})),
+        risk=RiskManager(load_config()), config=load_config(),
+        price_fn=lambda s: 100.0, source_timeout_seconds=0.2,
+    )
+    start = time.monotonic()
+    report = pipeline.run(ACCOUNT, {})
+    elapsed = time.monotonic() - start
+    assert elapsed < 1.0                                        # didn't wait for the 2s sleep
+    assert "QUICK" in [c.symbol for c in report.candidates]      # fast source's result still counts
+    assert "NEVERARRIVES" not in [c.symbol for c in report.candidates]
+
+
+def test_one_source_exception_does_not_sink_the_others():
+    class BoomSource:
+        name = "boom"
+
+        def gather(self):
+            raise RuntimeError("source blew up")
+
+    pipeline = DiscoveryPipeline(
+        sources=[BoomSource(), FastSource([_congress("SURVIVOR", 0.8)])],
+        scorer=Scorer(active_sources=frozenset({"congress", "technical"})),
+        risk=RiskManager(load_config()), config=load_config(),
+        price_fn=lambda s: 100.0,
+    )
+    report = pipeline.run(ACCOUNT, {})
+    assert "SURVIVOR" in [c.symbol for c in report.candidates]
+
+
+def test_timed_out_source_does_not_block_process_exit():
+    """Regression guard: an earlier version of _gather() used
+    ThreadPoolExecutor, whose worker threads are non-daemon --
+    concurrent.futures.thread registers a process-wide atexit hook that
+    joins EVERY thread from EVERY executor, even ones already
+    shutdown(wait=False)'d, so a single hung source blocked the whole
+    Python process at exit for as long as that source kept running (this
+    is called from the always-on Telegram listener for `/ideas`, not just
+    a one-shot script, so that's a real hang, not just test-suite noise).
+    Confirmed live: a 4s-hung source made a `python -c` subprocess take 4s
+    to exit even though its own logic finished in ~0.2s. Run the same
+    scenario as a real subprocess -- the whole process must exit promptly,
+    not just DiscoveryPipeline.run()."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[2]
+    script = f"""
+import time
+from src.common.config import load_config
+from src.discovery.pipeline import Account, DiscoveryPipeline
+from src.discovery.scorer import Scorer
+from src.risk.risk_manager import RiskManager
+
+class HungSource:
+    name = "hung"
+    def gather(self):
+        time.sleep({4.0})
+        return []
+
+pipeline = DiscoveryPipeline(
+    sources=[HungSource()],
+    scorer=Scorer(active_sources=frozenset({{"congress"}})),
+    risk=RiskManager(load_config()), config=load_config(),
+    price_fn=lambda s: 100.0, source_timeout_seconds=0.2,
+)
+pipeline.run(Account(equity=1.0, last_equity=1.0, buying_power=1.0), {{}})
+print("script logic finished")
+"""
+    start = time.monotonic()
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
+                            timeout=15, cwd=repo_root)
+    elapsed = time.monotonic() - start
+    assert result.returncode == 0, result.stderr
+    assert "script logic finished" in result.stdout
+    assert elapsed < 2.0, f"process took {elapsed:.2f}s to exit -- hung source blocked shutdown"
+
+
+def test_cached_feature_provider_is_safe_from_multiple_threads(tmp_path, monkeypatch):
+    """The shared sqlite connection (src/discovery/universe.cached_feature_
+    provider) must not raise sqlite3.ProgrammingError when the returned
+    closure is called from a thread other than the one that built it -- the
+    scenario Phase 5's concurrent _gather() actually creates (technical and
+    volatility both call into this same closure, now possibly from different
+    worker threads). sqlite3 connections are check_same_thread=True by
+    default (src/data/store.py's connect()), so this fails loudly, not
+    subtly, if the thread-local fix in cached_feature_provider() regresses."""
+    import pandas as pd
+
+    import src.data.ingest as ingest_mod
+    from src.data import store
+    from src.discovery.universe import cached_feature_provider
+    from tests.unit.synth import make_features
+
+    db_path = tmp_path / "bars.db"
+    real_connect = store.connect
+    # cached_feature_provider() always calls store.connect() with no args
+    # (module default DB path, bound at import time -- monkeypatching
+    # store.DEFAULT_DB after the fact wouldn't redirect it); patch the
+    # function itself so every call -- the initial one AND any thread-local
+    # fallback -- opens a REAL sqlite3.Connection (default check_same_thread
+    # semantics preserved) against this test's tmp file instead.
+    monkeypatch.setattr(store, "connect", lambda *a, **kw: real_connect(db_path))
+
+    now = pd.Timestamp("2026-08-25 12:00", tz="America/New_York")
+    monkeypatch.setattr(ingest_mod.pd.Timestamp, "now", classmethod(lambda cls, tz=None: now))
+
+    bars = make_features([{"close": 100.0} for _ in range(30)])
+    bars.index = pd.date_range(end=now.tz_convert("UTC"), periods=30, freq="D", tz="UTC")
+    store.upsert_bars(real_connect(db_path), "AAPL", bars)
+
+    config = load_config()
+    # universe=None: skip the batch pre-warm path (its own network fallback
+    # isn't what this test is about) -- ingest_symbol()'s own same-day
+    # freshness short-circuit (patched `now` above) is enough to guarantee
+    # no network call from any thread either way.
+    provider = cached_feature_provider(config, universe=None)
+
+    errors: list[BaseException] = []
+    results: list = []
+    lock = threading.Lock()
+
+    def call_from_thread():
+        try:
+            feats = provider("AAPL")
+        except BaseException as exc:  # noqa: BLE001 - want to see ANY failure, not just Exception
+            with lock:
+                errors.append(exc)
+            return
+        with lock:
+            results.append(feats)
+
+    threads = [threading.Thread(target=call_from_thread) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert not errors, f"cross-thread feature_provider call(s) raised: {errors}"
+    assert len(results) == 4
+    assert all(not f.empty for f in results)

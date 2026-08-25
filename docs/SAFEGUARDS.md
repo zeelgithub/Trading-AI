@@ -38,6 +38,27 @@ a great strategy with no controls eventually does not. Config:
 - **Max position / per-symbol exposure** caps.
 - **Max gross exposure / leverage** cap.
 - **Fat-finger band:** reject orders priced > 20% off last quote.
+- **Discovery price floor: REMOVED (2026-08-24, same day it was added).**
+  `discovery.min_price` was a guard (default $5.0, the SEC's own conventional
+  penny-stock line) blocking any candidate priced below it from becoming a
+  Proposal, from ANY discovery source, enforced centrally in
+  `DiscoveryPipeline._size_and_propose()`. Reasoning at the time: below that
+  line, overnight gaps (dilution, reverse splits, delisting news) are common
+  and large enough to jump clean over a resting stop order — the specific
+  mechanism every other guard on this page assumes still works. The user
+  explicitly revisited that tradeoff the same day (asked to widen discovery
+  further; shown the exact gap-risk mechanism again via a direct question;
+  chose "$0 / no floor") and `discovery.min_price` is now `0.0`. **This means
+  a discovery-sourced Proposal can now be for a sub-$5, or sub-$1, stock, and
+  for those positions the "a resting stop always protects the position"
+  assumption this page otherwise relies on is NOT reliable** — that gap is
+  disclosed here, not silently absorbed by wording it wouldn't change. It is
+  a real, accepted reduction in protection for that slice of positions, not
+  a cosmetic config change. See `docs/ROADMAP.md` Phase H for the full
+  request and the risk disclosure that preceded it, and Phase E for why the
+  guard existed in the first place. The widened universe (S&P 500/400/600
+  plus the small-cap/volatile screens, `docs/ROADMAP.md` Phases E-G) and the
+  volatility source (below) no longer have this boundary to respect.
 - **Rate limiting:** max orders per minute and per day (runaway-loop guard).
 - **Duplicate-order guard:** idempotency keys so a retry never doubles a position.
 

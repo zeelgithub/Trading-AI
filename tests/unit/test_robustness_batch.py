@@ -17,6 +17,7 @@ from src.core.state_store import HaltStore, StateStore
 from src.core.watchdog import evaluate_health
 from src.data import store
 from src.data.ingest import drop_incomplete_bar, ingest_symbol
+from src.research.equity_history import EquityHistory
 from src.research.scoreboard import Scoreboard
 from src.strategy.base import Strategy
 from src.strategy.registry import REGISTRY, build_strategies, register
@@ -153,6 +154,7 @@ def test_connection_failure_halts_as_disconnect(tmp_path, monkeypatch):
         halt_store=HaltStore(tmp_path / "halt.json"),
         audit=AuditLog(tmp_path / "audit.jsonl"),
         scoreboard=Scoreboard(tmp_path / "scoreboard.json"),
+        equity_history=EquityHistory(tmp_path / "equity_history.json"),
     )
     report = orch.run_cycle()
     assert report.halted

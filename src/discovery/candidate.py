@@ -14,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 # The canonical source names. Weights in config are keyed by these.
-SOURCES = ("congress", "technical", "news", "fundamentals")
+SOURCES = ("congress", "technical", "news", "fundamentals", "volatility", "social")
 
 
 @dataclass

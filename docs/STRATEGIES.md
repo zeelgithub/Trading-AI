@@ -2,9 +2,9 @@
 
 Three strategies on **daily bars** (swing holds), routed by a **regime filter** so that
 only one strategy trades a given symbol at a time. Equal risk budget across strategies.
-Config: [`config/strategies.yaml`](../config/strategies.yaml). A fourth candidate
-(cross-sectional momentum) is under research — not live-wired, not config-registered;
-see "Strategy candidate" below.
+Config: [`config/strategies.yaml`](../config/strategies.yaml). Two further candidates
+(cross-sectional momentum, 52-week-high anchoring momentum) are under research — not
+live-wired, not config-registered; see the "Strategy candidate" sections below.
 
 ## Regime filter (traffic cop)
 
@@ -414,6 +414,101 @@ weakest.
   alongside the trio? replace regime-gating with something else for this one
   symbol-set?). Promotion is an open decision, not a default next step — the
   same bar every strategy in this file has been held to.
+
+## Strategy candidate — 52-Week-High Anchoring Momentum (research-only, not live-wired)
+
+2026-08-24. A third, structurally distinct candidate: George & Hwang (2004)
+"The 52-Week High and Momentum Investing" — investors anchor on a stock's own
+trailing 52-week high as a reference price and are slow to bid above it even
+on good news, so a stock reaching or breaking that anchor tends to keep
+drifting for weeks as the market gradually re-rates it. Distinct from both
+strategies above it in this file: trend_following reads EMA/ADX trend
+structure; cross-sectional momentum ranks a symbol's trailing return AGAINST
+THE REST OF THE UNIVERSE on a given date. This one is single-symbol and
+absolute-threshold — the anchor is a stock's own price history, nothing else
+— so unlike cross-sectional momentum it needed no cross-symbol precompute
+step (`src/research/cross_sectional.py`); `src/strategy/week52_high.py`
+computes its rolling 252-bar high/low directly off `features`'s own
+high/low/close columns, the same inline style `src/strategy/breakout.py`
+uses for its support/resistance window.
+
+- **Entry:** fires the day a symbol NEWLY enters the "within `proximity_pct`
+  of its trailing 252-bar high" zone (default 5%) — a transition, not
+  "already near the high → buy the extended move" (same bucket-transition
+  design as cross-sectional momentum, applied to a different measure).
+  Confirmed by the same real-bodied confirmation candle every other strategy
+  requires. Symmetric short leg: newly enters the near-252-bar-low zone (the
+  anchoring literature documents a weaker but real symmetric downside
+  effect), gated by `shorts_allowed()` like every other strategy's short
+  leg.
+- **Exit:** no signal-based exit — `should_exit` uses the base class's "no
+  signal" default, riding the ATR ratchet alone (2x initial, 1.5x trail,
+  reused from breakout's own tested defaults as a starting point, not yet
+  independently tuned). Deliberate: the entry is a punctual breakthrough
+  EVENT, not an ongoing state like momentum's bucket membership, so
+  re-checking "still near the anchor" daily would exit on the very next small
+  pullback and cut off the drift this strategy exists to capture — same
+  exit philosophy as breakout, which is also event-triggered and also
+  ATR-ratchet-only.
+
+**Isolation, by design:** same as the momentum candidate above — not
+decorated with `@register`, no block in `config/strategies.yaml`,
+`src/strategy/registry.build_strategies()` can never instantiate this
+without an explicit code change. Evaluated only via
+`scripts/research_week52_high.py`, registering into `REGISTRY` for that
+process's own lifetime, never writing to `config/*.yaml` or touching the
+broker. Also uses `Backtester.run(..., force_strategy="week52_high")` to
+bypass regime routing — this candidate isn't regime-conditional either.
+
+**Results** (`python -m scripts.research_week52_high`, same
+survivorship-bias-corrected universe and 1500-day/~4.1-year lookback as the
+other studies above):
+
+| trial | trades | win% | PF | p-value | PSR | consistency | verdict |
+|---|---|---|---|---|---|---|---|
+| in-sample | 345 | 42.0 | 1.62 | 0.002 | 1.00 | 0.75 | **VALIDATED** |
+
+| fold | window | trades | win% | PF | p(raw) |
+|---|---|---|---|---|---|
+| 1 | 2022-07-05..2023-11-16 | 36 | 44.4 | 0.99 | 0.562 |
+| 2 | 2023-11-17..2025-04-07 | 146 | 43.1 | 1.76 | 0.003 |
+| 3 (holdout) | 2025-04-08..2026-08-24 | 164 | 40.8 | 1.61 | 0.040 |
+
+A materially different shape from every other candidate in this file: far
+more trades (345 vs. trend_following's 43 or momentum's 80 — a 5%-wide
+proximity band on a 252-bar anchor fires often across 34 symbols) at a much
+thinner per-trade edge (PF 1.62 vs. 3.60–3.66 for the others). High trade
+count is exactly why it clears significance easily (p=0.002) despite the
+thin edge — a real, if less dramatic-looking, statistical result, not a
+weaker one.
+
+**Caveats — held to the same bar as the others, and this one has a real
+weak spot the others don't:**
+- Fold 1 is flat-to-negative (PF 0.99, 36 trades) — the ONLY fold, across
+  all three candidates evaluated in this file, where a fold's PF sits at or
+  below 1. Folds 2 and 3 are solidly profitable (PF 1.76, 1.61), including
+  the true holdout, but this is not the clean "PF > 1 in every fold" result
+  trend_following and momentum both produced. Read as a real, reported
+  weakness, not smoothed over by the strong in-sample number.
+- The p=0.002 above is a STANDALONE trial (n=1) — if treated as a 5th trial
+  alongside the original 3-strategy study and the momentum candidate, the
+  honest comparison is Sidak-adjusted for n=5, stricter than what's shown.
+- "Validated" (in-sample or walk-forward) is a floor to clear, not
+  authorization to trade live — same as every other candidate here. No live
+  or paper-traded fill exists for this one either.
+- The ATR ratchet multiples (2x initial, 1.5x trail) are reused from
+  breakout's tuned values, not independently fit for this strategy's own
+  dynamics — a reasonable starting point given the shared ATR-ratchet-only
+  exit philosophy, but genuinely untested as a choice specific to this
+  candidate.
+- The correlation-aware risk cap (`RiskManager.evaluate()` step 7.6,
+  `src/risk/correlation.py`, see the momentum write-up above and
+  docs/SAFEGUARDS.md) applies to ANY strategy's positions at the risk-gate
+  level, not per-strategy — so it would already cover this candidate's
+  entries too if it were ever live-wired, without further changes.
+- Not yet promoted: no `@register`, no `config/strategies.yaml` block, no
+  decision on regime-routing coexistence, no ATR-multiple tuning pass.
+  Promotion is an open decision, not a default next step.
 
 ## Tested, rejected: two research-backed hypotheses that didn't hold up
 

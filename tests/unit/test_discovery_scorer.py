@@ -47,11 +47,14 @@ def test_from_config_reads_enabled_sources():
     from src.common.config import load_config
 
     scorer = Scorer.from_config(load_config())
-    # technical/news/fundamentals on (news/fundamentals enabled 2026-08-22 --
-    # both fail soft per-symbol, no new credentials needed); congress stays
-    # off (no ingestion ships in this repo -- see congress_copy/README.md
-    # "Scheduled ingestion").
-    assert scorer.active_sources == frozenset({"technical", "news", "fundamentals"})
+    # technical/news/volatility on (news enabled 2026-08-22, volatility
+    # 2026-08-24 -- fail soft per-symbol, no new credentials needed);
+    # fundamentals enabled 2026-08-22 then disabled again 2026-08-25 (yfinance
+    # throughput doesn't scale to the ~4,000-symbol universe -- see
+    # docs/ROADMAP.md Phase J); social off by default (needs Reddit creds);
+    # congress stays off (no ingestion ships in this repo -- see
+    # congress_copy/README.md "Scheduled ingestion").
+    assert scorer.active_sources == frozenset({"technical", "news", "volatility"})
 
 
 def test_stars_track_score():

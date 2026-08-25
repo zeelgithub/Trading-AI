@@ -13,17 +13,11 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from congress_copy.providers import JSONFileProvider
 from src.common.config import Config, load_config
 from src.discovery.pipeline import DiscoveryPipeline, PriceFn
 from src.discovery.scorer import Scorer
-from src.discovery.sources.congress import CongressSource
-from src.discovery.sources.technical import TechnicalSource
-from src.discovery.universe import (
-    DEFAULT_DISCLOSURES,
-    cached_feature_provider,
-    discovery_universe,
-)
+from src.discovery.sources.registry import REGISTRY, SourceContext
+from src.discovery.universe import cached_feature_provider, discovery_universe
 from src.discovery.weight_advisor import DiscoveryWeightStateStore
 from src.research.scoreboard import Scoreboard
 from src.risk.risk_manager import RiskManager
@@ -55,37 +49,29 @@ def build_discovery_pipeline(
     d = config.get("settings.discovery", {}) or {}
     enabled = d.get("sources", {}) or {}
 
-    sources = []
-    if enabled.get("congress", False):
-        cfg = d.get("congress", {}) or {}
-        sources.append(CongressSource(
-            provider=JSONFileProvider(DEFAULT_DISCLOSURES),
-            politicians=tuple(cfg.get("politicians", []) or ()),
-            max_age_days=int(cfg.get("max_disclosure_age_days", 45)),
-        ))
-    if enabled.get("technical", False):
-        sources.append(TechnicalSource(
-            config=config,
-            feature_provider=feature_provider or cached_feature_provider(config),
-            universe=discovery_universe(config),
-            scoreboard=scoreboard or Scoreboard(),
-        ))
-    if enabled.get("news", False):
-        from src.data.providers.news import AlpacaNews
-        from src.discovery.sources.news import NewsSource
-        ncfg = d.get("news", {}) or {}
-        sources.append(NewsSource(
-            provider=AlpacaNews(),
-            universe=discovery_universe(config),
-            days=int(ncfg.get("lookback_days", 7)),
-        ))
-    if enabled.get("fundamentals", False):
-        from src.data.providers.fundamentals import YFinanceFundamentals
-        from src.discovery.sources.fundamentals import FundamentalsSource
-        sources.append(FundamentalsSource(
-            provider=YFinanceFundamentals(),
-            universe=discovery_universe(config),
-        ))
+    # Computed once and shared by every source below -- previously each
+    # enabled source called discovery_universe(config) independently
+    # (cheap but redundant), and technical/volatility each built their OWN
+    # cached_feature_provider(config) with no universe hint, so the bar
+    # cache got warmed with ~4,000 individual HTTP round-trips instead of a
+    # handful of batched ones. See cached_feature_provider()'s docstring.
+    universe = discovery_universe(config)
+    _shared_feature_provider = None
+
+    def _feature_provider():
+        nonlocal _shared_feature_provider
+        if feature_provider is not None:
+            return feature_provider
+        if _shared_feature_provider is None:
+            _shared_feature_provider = cached_feature_provider(config, universe=universe)
+        return _shared_feature_provider
+
+    # One registered factory per source name (src/discovery/sources/registry.py)
+    # instead of a hand-written if/elif chain -- adding a 7th source means
+    # registering it there, not editing this loop.
+    ctx = SourceContext(config=config, discovery=d, universe=universe,
+                        feature_provider=_feature_provider, scoreboard=scoreboard)
+    sources = [factory(ctx) for name, factory in REGISTRY.items() if enabled.get(name, False)]
 
     # Approved reweighting (src/discovery/weight_advisor.py, applied via
     # /reweight on the phone) overrides the static config default -- absent
@@ -104,4 +90,6 @@ def build_discovery_pipeline(
         min_score=float(d.get("min_score", 25)),
         default_stop_pct=float((d.get("congress", {}) or {}).get("default_stop_pct", 10.0)),
         expiry_minutes=int(config.get("settings.approval.proposal_expiry_minutes", 1080)),
+        min_price=float(d.get("min_price", 5.0)),
+        source_timeout_seconds=float(d.get("source_timeout_seconds", 300.0)),
     )

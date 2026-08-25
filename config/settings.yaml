@@ -24,7 +24,7 @@ alerts:
   # filter (config.get("...alerts.on") always missed, so every event type
   # was sent regardless of this list). Confirmed via yaml.safe_load().
   events: [halt, kill_switch, reconciliation_mismatch, fill, daily_summary,
-           watchdog, self_heal, incident]
+           watchdog, self_heal, incident, universe_stale]
   # Every protective stop is a stop-MARKET, not stop-limit (deliberate -- see
   # docs/SAFEGUARDS.md "Stop order type (gap-down risk)"): a stop-limit can go
   # completely unfilled on a large gap, leaving a naked position, which is a
@@ -140,6 +140,31 @@ discovery:
   # No top-level on/off switch -- control is per-source below (discovery.sources).
   top_n: 4                 # how many ranked ideas to surface per run
   min_score: 25            # 0-100 confidence floor; below this we don't suggest
+  # Added with the source registry + concurrent pipeline (2026-08-25): each
+  # source now runs on its own thread, bounded by this timeout instead of
+  # running sequentially and unbounded -- what actually made the throttled
+  # `fundamentals` cycle blow past 15-30min possible to fix (a timed-out
+  # source just skips this cycle, same fail-soft posture as an exception).
+  # 300s gives every currently-enabled source generous headroom; lower this
+  # once real per-source timing is observed live.
+  source_timeout_seconds: 300.0
+  # REMOVED 2026-08-24, same day it was added, at the user's explicit
+  # follow-up request ("i want to add more" -> shown the exact stop-loss-
+  # gap-risk tradeoff via a direct question -> chose "$0 / no floor").
+  # Originally $5.0 (the SEC's conventional penny-stock line): a candidate
+  # priced below it never became a Proposal, from ANY source (congress,
+  # technical, news, fundamentals, volatility), enforced once, centrally, in
+  # DiscoveryPipeline._size_and_propose() -- because overnight gaps
+  # (dilution, reverse splits, delisting news) are common and large enough
+  # in penny-stock range to jump clean over a resting stop order, which
+  # defeats the one mechanism this project's entire risk architecture
+  # assumes still works (see docs/SAFEGUARDS.md). That mechanism gap is NOT
+  # fixed by anything else in this file -- setting this to 0 is a genuine,
+  # disclosed reduction in protection for sub-$5 (and especially sub-$1)
+  # positions sourced through discovery, not a cosmetic change. See
+  # docs/ROADMAP.md Phase H for the full request and the exact tradeoff the
+  # user was shown before choosing this.
+  min_price: 0.0
   sources:                 # which signal sources are live (phased rollout)
     congress: false        # Phase A -- congressional disclosures. OFF by default:
                            # no ingestion ships in this repo (congress_copy/README.md
@@ -151,18 +176,54 @@ discovery:
     news: true              # Phase B -- Alpaca free news/sentiment. Enabled 2026-08-22:
                             # AlpacaNews reuses the existing market-data credentials, no
                             # new setup needed; keyword-lexicon scoring, read-only.
-    fundamentals: true      # Phase C -- yfinance quality filter. Enabled 2026-08-22:
-                            # yfinance was a declared-but-not-installed optional dependency
-                            # (requirements.txt) -- installed (1.6.0) as part of turning
-                            # this on. Both sources fail soft per-symbol (try/except in
-                            # gather()), so a transient yfinance/Alpaca-news hiccup skips
-                            # that name rather than crashing the discovery cycle.
+    fundamentals: false     # Phase C -- yfinance quality filter. Enabled 2026-08-22, then
+                            # DISABLED again 2026-08-25 once the universe grew to ~4,000
+                            # symbols: yfinance's `.info` (needed for profitMargins/
+                            # revenueGrowth -- the lighter `fast_info` used elsewhere in this
+                            # project lacks those fields) throttles under sustained volume in
+                            # a way concurrency doesn't fix -- confirmed live, doubling the
+                            # thread pool 8->16 workers produced no proportional speedup, a
+                            # full cycle still ran 15-30+ minutes and made the daily schedule
+                            # unreliable (this is what caused the bot-discovery /
+                            # bot-run-paper-propose task failures that day). Was always a
+                            # secondary 0.15-weight nudge, never the primary signal -- turn
+                            # back on only if yfinance's throughput improves or this source
+                            # is rescoped to a smaller symbol slice (see docs/ROADMAP.md
+                            # Phase J for the fuller writeup and the options considered).
+                            # Both this and news fail soft per-symbol regardless (try/except
+                            # in gather()), so a transient hiccup skips that name rather than
+                            # crashing the cycle -- that was never the problem, throughput was.
+    volatility: true        # Enabled 2026-08-24, at the user's request for "more
+                            # aggressive" candidates -- src/discovery/sources/volatility.py
+                            # re-ranks the EXISTING universe by ATR-as-%-of-price
+                            # (percentile within today's screen), it does NOT add any
+                            # new, less-liquid, or gap-risky tickers. Deliberately not
+                            # a penny-stock/leveraged-ETF universe expansion -- see that
+                            # module's docstring for why.
+    social: false           # Phase I -- Reddit ($TICKER cashtag mentions on r/wallstreetbets
+                            # etc., weighted by upvotes, percentile-ranked). OFF by default:
+                            # needs REDDIT_CLIENT_ID/REDDIT_CLIENT_SECRET in .env (a free
+                            # "script" app at reddit.com/prefs/apps -- see .env.example),
+                            # same "off until credentials exist and are confirmed working"
+                            # posture as congress/news/fundamentals were. Twitter/X, Unusual
+                            # Whales options-flow data, and investing.com were all evaluated
+                            # the same day and rejected: X only exposes ~5 posts to logged-out
+                            # requests (no reliable structure), Unusual Whales' real data is
+                            # a paid API, and investing.com has no reliable ticker-lookup path
+                            # (URLs use company-name slugs, no working search API found) --
+                            # see src/discovery/sources/social.py's docstring.
   weights:                 # relative blend weights (renormalised over the
                            # sources that are switched on); confluence scores higher
     congress: 0.60         # lead signal once ingestion exists and this is turned on
     technical: 0.35
     news: 0.15
     fundamentals: 0.15
+    volatility: 0.15       # a nudge toward bigger-swing names, not a dominant signal --
+                           # same weight class as news/fundamentals, well below
+                           # technical/congress's actual trade-conviction signals
+    social: 0.15           # same weight class as news/fundamentals/volatility -- a hype/
+                           # attention nudge, never enough alone to drive a Proposal past
+                           # min_score without confluence from a real signal
   congress:
     politicians: []        # empty = any member in the file; else an allowlist
     max_disclosure_age_days: 60   # disclosures lag 30-45d; still-relevant names
@@ -170,6 +231,10 @@ discovery:
     default_stop_pct: 10.0 # protective stop for a congress-only (no-technical) idea
   news:
     lookback_days: 7       # how far back to read headlines for sentiment
+  social:
+    subreddits: [wallstreetbets, stocks]  # public, no auth needed to READ once
+                                          # the app-only OAuth token is issued
+    limit_per_subreddit: 100             # "hot" posts fetched per subreddit per cycle
   universe:
     # Extra tickers to technically screen beyond the watchlist + congress names.
     # Broadened 2026-08-22 (10 -> 31 names) by merging with the still-listed
@@ -181,6 +246,13 @@ discovery:
     # for the entire ~11k-symbol tradable universe every cycle -- expensive and
     # not something to bolt on without dedicated design. This is a genuinely
     # wider net, not a claim of full-market coverage.
+    #
+    # Checked 2026-08-24 whether Alpaca's ScreenerClient.get_most_actives
+    # could substitute for a real scanner: tested live against the real
+    # account. Two hard limits -- the API itself caps `top` at 100 (no way to
+    # ask for more), and it ranks by raw share VOLUME, which surfaces mostly
+    # penny stocks and leveraged/inverse ETFs (TSLL, a 2x leveraged Tesla ETF,
+    # placed above INTC) rather than quality names. Not used for that reason.
     extra: [AAPL, MSFT, GOOGL, AMZN, NVDA, META, TSLA,
             JPM, BAC, WFC, GS, MS, COF,
             JNJ, UNH, PFE, ISRG,
@@ -190,3 +262,70 @@ discovery:
             KO, PEP,
             INTC, AMD,
             PLTR]
+    # Adds all ~500 S&P 500 constituents to the discovery universe
+    # (src/discovery/sp500.py -- a static list, hand-refreshed periodically,
+    # not a live index feed; see that module's docstring for sourcing/
+    # verification). Off by default so a fresh clone stays fast (33 symbols,
+    # seconds per run) -- turning this on means discovery ingests/screens
+    # ~500+ symbols every run instead, which takes materially longer
+    # (minutes, not seconds) and is a real, deliberate tradeoff, not a
+    # free win.
+    sp500: true
+    # Adds S&P MidCap 400 / SmallCap 600 constituents (src/discovery/sp400.py,
+    # sp600.py) -- together with sp500 above this approximates the "S&P 1500,"
+    # ~90% of US market cap. Same static-list tradeoff as sp500, compounded:
+    # roughly triples the total universe on top of sp500 alone (~1,500
+    # symbols), so a full run takes materially longer again (was ~7 min with
+    # sp500 alone; expect ~20 min with these also on). Small/mid-caps are also
+    # inherently more volatile and less liquid than the S&P 500's large-caps --
+    # a real characteristic change, not just "more of the same." Both lists
+    # are complete (see their own module docstrings for sourcing history).
+    sp400: true
+    sp600: true
+    # Adds a data-derived small/micro-cap screen (src/discovery/smallcap.py,
+    # ~688 tickers, built by scripts/build_smallcap_universe.py) -- widens
+    # further into "more volatile, more fluctuating" territory than
+    # sp500/400/600 reach, at the user's explicit request (2026-08-24). NOT
+    # an index membership list -- there's no free, scrapable Russell 2000 (or
+    # similar) constituent list, so this is built from first-party data
+    # instead: Nasdaq+NYSE bulk listing files -> real-common-stock filter
+    # (no ETFs/warrants/units/rights/preferred/ADRs/SPACs) -> exclude what
+    # sp500/400/600/watchlist/extras/volatile.py already cover -> Alpaca
+    # tradability -> Alpaca price/liquidity screen -> yfinance market-cap
+    # band ($50M-$6B, i.e. genuinely smaller than/adjacent to what the S&P
+    # lists cover, not a re-hash of them). A snapshot, not a live feed --
+    # regenerate periodically, same as sp500/400/600. See
+    # scripts/build_smallcap_universe.py's docstring for the full
+    # methodology, what was tried and rejected (Russell 2000 has no
+    # scrapable source), and the price/liquidity floors' history (originally
+    # $5 / $500k-day, REMOVED same day per Phase H below -- this list can
+    # now include sub-$5, thin-volume names if their market cap fits).
+    smallcap: true
+    # Adds a data-derived "fluctuating/volatile" screen (src/discovery/
+    # volatile.py, ~1,783 tickers, built by scripts/build_volatile_universe.py)
+    # -- direct follow-up to smallcap above, at the user's explicit request
+    # (2026-08-24: "why fluctuating stocks are not included? i want that to
+    # be included"). smallcap.py only reaches a $50M-$6B market-cap band, so
+    # a genuinely volatile name OUTSIDE that band -- too large for the cap
+    # band (a recent IPO, a name that's grown past $6B with no index seat
+    # yet) or simply not yet in S&P 500/400/600 -- fell through every other
+    # list. Confirmed live: this screen surfaced RIOT/CIFR/WULF/HUT (bitcoin
+    # miners), RKLB, ASTS, OKLO, QBTS, BE, ALAB, CRWV -- real, well-known,
+    # multi-billion-dollar volatile names, not junk. Reuses smallcap.py's own
+    # existing-universe exclusion so it can never duplicate another list;
+    # screens by Wilder's ATR(14) as % of price (the SAME metric
+    # src/discovery/sources/volatility.py re-ranks by) instead of market cap.
+    # Price/liquidity floors and the ATR cutoff were ALL loosened same day,
+    # same request as smallcap.py above (price/liquidity: $5/$500k -> ~$0;
+    # ATR: 3.0% -> 2.0%) -- see scripts/build_volatile_universe.py's
+    # docstring and docs/ROADMAP.md Phase H for the exact tradeoff shown to
+    # the user before this change. No yfinance step, so unlike smallcap.py
+    # it's immune to yfinance's rate limits.
+    volatile: true
+    # Every list above carries its own SOURCED_DATE but nothing checked it
+    # before src/discovery/freshness.py existed (2026-08-25) -- a run older
+    # than this many days fires a `universe_stale` Telegram alert (WARNING,
+    # never a halt -- see freshness.py's docstring for why). 45 matches the
+    # congress disclosure-lag tolerance above as a reasonable "still current
+    # enough" default, not a hard rule.
+    max_staleness_days: 45

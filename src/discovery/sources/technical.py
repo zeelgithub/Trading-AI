@@ -22,6 +22,7 @@ import pandas as pd
 
 from src.common.config import Config
 from src.discovery.candidate import SignalContribution
+from src.discovery.sources._util import safe_call, safe_num
 from src.research.scoreboard import Scoreboard
 from src.strategy.regime_filter import RegimeFilter
 from src.strategy.registry import build_strategies
@@ -49,10 +50,7 @@ class TechnicalSource:
         board = (self.scoreboard or Scoreboard()).load()
         out: list[SignalContribution] = []
         for symbol in dict.fromkeys(s.upper() for s in self.universe):
-            try:
-                feats = self.feature_provider(symbol)
-            except Exception:
-                continue
+            feats = safe_call(self.feature_provider, symbol)
             if feats is None or feats.empty:
                 continue
             active = self._regime.active_strategy(feats)
@@ -68,7 +66,7 @@ class TechnicalSource:
 
             last = feats.iloc[-1]
             regime = self._regime.classify(feats).value
-            rsi = _num(last, "rsi")
+            rsi = safe_num(last, "rsi")
             reason = f"Technical: {active} setup ({intent.side.value}), regime {regime}"
             if rsi is not None:
                 reason += f", RSI {rsi:.0f}"
@@ -82,13 +80,7 @@ class TechnicalSource:
                     "confidence": float(intent.confidence),
                     "entry_price": intent.entry_price if intent.entry_price else float(last.close),
                     "stop_loss": intent.stop_loss,
-                    "atr": _num(last, "atr"),
+                    "atr": safe_num(last, "atr"),
                 },
             ))
         return out
-
-
-def _num(row: pd.Series, col: str) -> float | None:
-    if col not in row or pd.isna(row[col]):
-        return None
-    return float(row[col])

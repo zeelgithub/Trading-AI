@@ -20,6 +20,7 @@ from src.common.logging import get_logger
 from src.core.proposals import ProposalStore
 from src.core.state_store import HaltStore, StateStore
 from src.discovery.builder import build_discovery_pipeline
+from src.discovery.freshness import stale_universe_lists, staleness_detail
 from src.discovery.ledger import DiscoveryLedger
 from src.discovery.pipeline import Account
 from src.execution.broker_alpaca import AlpacaAccountReader
@@ -36,6 +37,11 @@ def main() -> None:
     args = parser.parse_args()
 
     config = load_config()
+
+    stale = stale_universe_lists(config)
+    for flag, age, max_age in stale:
+        print(f"WARNING: discovery.universe.{flag} is {age}d old (limit {max_age}d) -- see freshness.py")
+
     broker = AlpacaAccountReader()
     account_raw = broker.get_account()
     account = Account(
@@ -67,6 +73,9 @@ def main() -> None:
     DiscoveryLedger().record_surface(report.candidates, report.proposals)
 
     notifier = build_notifier(config)
+    if stale:
+        notifier.alert("universe_stale", staleness_detail(stale))
+
     halted = HaltStore().is_halted()
     header = ideas_header(len(report.proposals), report.screened)
     if halted:

@@ -10,6 +10,7 @@ from src.core.orchestrator import Orchestrator
 from src.core.state_store import HaltStore, StateStore
 from src.execution.broker_alpaca import OrderView, PositionView
 from src.execution.order_manager import ManagedPosition, PositionStatus, realized_pnl
+from src.research.equity_history import EquityHistory
 from src.research.scoreboard import Scoreboard
 from src.risk.ratchet_stop import PercentRatchet
 from tests.unit.fakes import FakeBroker
@@ -32,7 +33,7 @@ def test_signal_exit_records_live_attribution(tmp_path):
         broker=broker, feature_provider=exit_frame, execute=True,
         state_store=StateStore(tmp_path / "p.json"),
         halt_store=HaltStore(tmp_path / "h.json"), audit=AuditLog(tmp_path / "a.jsonl"),
-        scoreboard=sb,
+        scoreboard=sb, equity_history=EquityHistory(tmp_path / "eq.json"),
     )
     orch.positions = {
         "AAPL": ManagedPosition(
@@ -60,7 +61,7 @@ def test_shadow_mode_records_nothing(tmp_path):
         feature_provider=exit_frame, execute=False,
         state_store=StateStore(tmp_path / "p.json"),
         halt_store=HaltStore(tmp_path / "h.json"), audit=AuditLog(tmp_path / "a.jsonl"),
-        scoreboard=sb,
+        scoreboard=sb, equity_history=EquityHistory(tmp_path / "eq.json"),
     )
     orch.positions = {
         "AAPL": ManagedPosition(

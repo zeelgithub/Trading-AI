@@ -26,6 +26,8 @@ DEFAULT_WEIGHTS = {
     "technical": 0.35,
     "news": 0.15,
     "fundamentals": 0.15,
+    "volatility": 0.15,
+    "social": 0.15,
 }
 
 

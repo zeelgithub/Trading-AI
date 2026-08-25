@@ -23,14 +23,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-def atomic_write_json(path: str | Path, payload, *, indent: int = 2, default=str) -> None:
-    """Write `payload` as JSON to `path` atomically (temp file + os.replace)."""
+def atomic_write_text(path: str | Path, content: str, *, encoding: str = "utf-8") -> None:
+    """Write `content` to `path` atomically: temp file in the same directory,
+    fsync, then os.replace -- readers see either the old file or the new one,
+    never a torn write."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(payload, fh, indent=indent, default=default)
+        with os.fdopen(fd, "w", encoding=encoding) as fh:
+            fh.write(content)
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp, path)
@@ -40,6 +42,11 @@ def atomic_write_json(path: str | Path, payload, *, indent: int = 2, default=str
         except OSError:
             pass
         raise
+
+
+def atomic_write_json(path: str | Path, payload, *, indent: int = 2, default=str) -> None:
+    """Write `payload` as JSON to `path` atomically -- see atomic_write_text."""
+    atomic_write_text(path, json.dumps(payload, indent=indent, default=default))
 
 
 def load_json_or_quarantine(path: str | Path) -> tuple[dict | list | None, Path | None]:

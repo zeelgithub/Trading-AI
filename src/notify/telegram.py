@@ -183,6 +183,7 @@ _EVENT_EMOJI = {
     "fill": "✅",
     "position_opened": "✅",
     "daily_summary": "📊",
+    "universe_stale": "🗓️",
 }
 
 

@@ -25,6 +25,7 @@ from src.execution.order_manager import (
     is_dead_entry,
 )
 from src.research.backtester import Backtester
+from src.research.equity_history import EquityHistory
 from src.research.scoreboard import Scoreboard
 from src.risk.ratchet_stop import PercentRatchet
 from tests.unit.fakes import FakeBroker
@@ -149,6 +150,61 @@ def test_symbols_unknown_keys_allowed_forward_compatible():
     validate_config(GOOD_SETTINGS, GOOD_RISK, None, symbols)  # must not raise
 
 
+# --- discovery.* schema (previously unvalidated -- see config_schema.py's
+# DiscoverySettings) -----------------------------------------------------
+
+def test_discovery_valid_block_passes():
+    settings = {**GOOD_SETTINGS, "discovery": {
+        "top_n": 4, "min_score": 25, "min_price": 0.0,
+        "sources": {"congress": False, "technical": True, "news": True,
+                    "fundamentals": False, "volatility": True, "social": False},
+        "weights": {"congress": 0.60, "technical": 0.35, "news": 0.15},
+    }}
+    validate_config(settings, GOOD_RISK)  # must not raise
+
+
+def test_discovery_unknown_source_key_is_rejected():
+    """A typo'd source key (e.g. 'technicals') used to be silently ignored
+    by Scorer.from_config()/builder.py -- never enabled, never erroring."""
+    settings = {**GOOD_SETTINGS, "discovery": {
+        "sources": {"technicals": True},
+    }}
+    with pytest.raises(ConfigError, match="technicals"):
+        validate_config(settings, GOOD_RISK)
+
+
+def test_discovery_unknown_weight_key_is_rejected():
+    settings = {**GOOD_SETTINGS, "discovery": {
+        "weights": {"congresss": 0.6},
+    }}
+    with pytest.raises(ConfigError, match="congresss"):
+        validate_config(settings, GOOD_RISK)
+
+
+def test_discovery_min_score_out_of_range_is_rejected():
+    settings = {**GOOD_SETTINGS, "discovery": {"min_score": 150}}
+    with pytest.raises(ConfigError, match="min_score"):
+        validate_config(settings, GOOD_RISK)
+
+
+def test_discovery_negative_source_timeout_is_rejected():
+    settings = {**GOOD_SETTINGS, "discovery": {"source_timeout_seconds": -1}}
+    with pytest.raises(ConfigError, match="source_timeout_seconds"):
+        validate_config(settings, GOOD_RISK)
+
+
+def test_discovery_universe_max_staleness_days_wrong_type_is_rejected():
+    settings = {**GOOD_SETTINGS, "discovery": {
+        "universe": {"max_staleness_days": "forty-five"},
+    }}
+    with pytest.raises(ConfigError, match="max_staleness_days"):
+        validate_config(settings, GOOD_RISK)
+
+
+def test_discovery_missing_block_uses_defaults():
+    validate_config(GOOD_SETTINGS, GOOD_RISK)  # no "discovery" key at all -- must not raise
+
+
 # --- cross-process locking ------------------------------------------------
 
 def test_bot_lock_serializes_and_times_out(tmp_path):
@@ -204,6 +260,7 @@ def _orch(broker, tmp_path, provider=None, **kw):
         halt_store=HaltStore(tmp_path / "halt.json"),
         audit=AuditLog(tmp_path / "audit.jsonl"),
         scoreboard=Scoreboard(tmp_path / "scoreboard.json"),
+        equity_history=EquityHistory(tmp_path / "equity_history.json"),
         lock_path=tmp_path / ".bot.lock",
         **kw,
     )
