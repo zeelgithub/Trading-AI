@@ -15,10 +15,13 @@ Boundary: read-only; places orders NO.
 
 from __future__ import annotations
 
+from src.common.config import load_config
 from src.common.logging import AuditLog
 from src.core.proposals import ProposalStore
 from src.core.state_store import HaltStore, StateStore
 from src.execution.order_manager import PositionStatus
+from src.research.equity_history import EquityHistory
+from src.research.readiness import criteria_from_config, evaluate_readiness
 from src.research.scoreboard import Scoreboard
 
 
@@ -101,4 +104,23 @@ def scoreboard_snapshot(*, scoreboard: Scoreboard | None = None) -> dict:
             }
             for s in scoreboard.rank()
         ]
+    }
+
+
+def readiness_snapshot(*, equity_history: EquityHistory | None = None) -> dict:
+    """Real-capital readiness scorecard: docs/ROADMAP.md Step 7's go/no-go
+    bar, computed against the real paper equity track record. Read-only --
+    unlike scripts/readiness_report.py, this does NOT append to the
+    persisted audit trail (a phone glance shouldn't itself count as a
+    recorded decision check-in)."""
+    equity_history = equity_history or EquityHistory()
+    report = evaluate_readiness(equity_history.load(), criteria_from_config(load_config()))
+    return {
+        "verdict": report.verdict,
+        "track_record_days": report.track_record_days,
+        "blocking": report.blocking,
+        "checks": [
+            {"name": c.name, "passed": c.passed, "actual": c.actual, "threshold": c.threshold}
+            for c in report.checks
+        ],
     }

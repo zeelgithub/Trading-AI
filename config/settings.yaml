@@ -132,6 +132,38 @@ research:
      INTC, AMD,
      SIVB, FRC, SBNY, RAD, YELL, PRTY]
 
+  # Real-capital readiness bar (src/research/readiness.py,
+  # `python -m scripts.readiness_report`, phone `/readiness`) -- turns
+  # docs/ROADMAP.md Step 7's "weeks/months of genuine profitability" into
+  # checkable numbers against the real paper equity track record
+  # (state/equity_history.json). Purely a reporting/decision-support
+  # feature: it never gates or automates the real-capital decision, only
+  # informs it. Every field here has a matching default in
+  # src/research/readiness.py's ReadinessCriteria if omitted.
+  readiness:
+    # ~3 trading months -- the conservative low end of "weeks/months"; no
+    # capital is at risk in waiting slightly longer than strictly needed.
+    min_track_record_days: 60
+    # Below this many tracked days, Sharpe/drawdown/bootstrap/PSR are
+    # statistically meaningless -- mirrors scoreboard.classify()'s own
+    # num_trades < 10 floor.
+    min_days_for_stats: 20
+    # Must be net profitable over the window, not merely "not terrible."
+    min_total_return_pct: 0.0
+    # The backtest achieved 1.30 (docs/ROADMAP.md Step 6b); the live daily
+    # curve is noisier (concurrent real positions, real fills, real gaps),
+    # so this bar is set lower deliberately, not copied from the backtest.
+    min_annualized_sharpe: 0.5
+    # Cumulative peak-to-trough over the whole window -- looser than the
+    # per-day kill switch (risk_limits.yaml max_daily_loss_pct: 4.0) since
+    # this bounds a multi-week drawdown, not one bad day.
+    max_drawdown_pct: 15.0
+    # Same thresholds src/research/scoreboard.py's classify() already uses
+    # for a backtest "validated" verdict -- reused here for one consistent
+    # statistical bar across the codebase rather than picking new numbers.
+    max_bootstrap_p_value: 0.05
+    min_psr: 0.95
+
 discovery:
   # Autonomous idea discovery: gather candidates from multiple free signal
   # sources, score them deterministically, and push the top N to the phone as

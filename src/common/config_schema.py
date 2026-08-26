@@ -161,8 +161,23 @@ class AlertsSettings(_Lenient):
     gap_slippage_alert_pct: float = Field(2.0, gt=0)
 
 
+class ReadinessSettings(_Lenient):
+    # Real-capital readiness bar (src/research/readiness.py) -- turns
+    # "weeks/months of genuine profitability" (docs/ROADMAP.md Step 7) into
+    # checkable numbers. See config/settings.yaml's research.readiness
+    # comments for the rationale behind each default.
+    min_track_record_days: int = Field(60, gt=0)
+    min_days_for_stats: int = Field(20, gt=0)
+    min_total_return_pct: float = Field(0.0)
+    min_annualized_sharpe: float = Field(0.5)
+    max_drawdown_pct: float = Field(15.0, gt=0, le=100)
+    max_bootstrap_p_value: float = Field(0.05, ge=0, le=1)
+    min_psr: float = Field(0.95, ge=0, le=1)
+
+
 class ResearchSettings(_Lenient):
     backtest_universe: list[str] = Field(default_factory=list)
+    readiness: ReadinessSettings = Field(default_factory=ReadinessSettings)
 
 
 class BacktestSettings(_Lenient):

@@ -359,7 +359,52 @@ agentic-rebuild memory. Phase by phase, each shipped with tests:
   sake. `src/discovery/weight_advisor.py` (the source-reweighting advisor) deliberately does
   NOT route through this framework either, so the one adaptive feature this project has
   still needs no API key -- see "Phase D2" below.
-- [ ] **Phase 6 — scale & observability** (data-driven registries, per-agent budgets, decision audit).
+- [x] **Phase 6 — real-capital readiness audit (reframed 2026-08-24)**
+  (`src/research/readiness.py`, `scripts/readiness_report.py`, phone
+  `/readiness`). Originally scoped as agent-plane scale/observability
+  (data-driven registries, per-agent LLM budgets, a decision audit) back
+  when this plan assumed the cognitive-plane agents (`nl_router`,
+  `strategy_analyst`, `anomaly_triage`) would eventually run live against a
+  real Anthropic API key. Asked directly: they still don't, and won't —
+  the human-in-the-loop / keyless design ("Human-in-the-loop reasoning"
+  below) stays as-is, so a registry of agents and per-agent budgets have
+  nothing to observe. Redirected the one part of the original scope that
+  still answered a real open question — a persisted **decision audit** —
+  at the actual gap: Step 7 above says paper EXECUTE continues "until
+  weeks/months of it exist and show genuine profitability" before any
+  real-capital decision, but that bar was never made concrete or
+  checkable; it was a sentence, not a mechanism.
+  - `ReadinessCriteria` (`config/settings.yaml` → `research.readiness`,
+    schema-validated in `config_schema.py`): min track-record length (60
+    days — the conservative low end of "weeks/months"), a floor below
+    which stats aren't computed at all (`min_days_for_stats: 20`, mirrors
+    `scoreboard.classify()`'s own `num_trades < 10` floor), net-positive
+    total return, a minimum annualized Sharpe (0.5 — deliberately looser
+    than the backtest's 1.30, since the live curve is noisier), a max
+    cumulative drawdown (15%, looser than the per-day kill switch's 4%
+    since this bounds a multi-week move not one bad day), and the exact
+    same bootstrap-p-value/PSR thresholds (`0.05`/`0.95`)
+    `scoreboard.classify()` already uses for a backtest "validated"
+    verdict — reused for one consistent statistical bar, not new numbers.
+  - `evaluate_readiness()` reuses `src/research/significance.py`'s
+    `bootstrap_pvalue`/`probabilistic_sharpe_ratio` directly against the
+    real daily-equity series (`state/equity_history.json`) rather than
+    inventing new statistics; verdict is `"ready"` / `"not_yet"` /
+    `"insufficient_data"` (the last one specifically to avoid a misleading
+    pass/fail on too few tracked days to mean anything).
+  - `ReadinessAudit` persists every evaluation (`state/readiness_audit.json`,
+    append-only — a same-day re-check after acting on a blocker is its own
+    meaningful event, unlike `EquityHistory`'s per-calendar-date upsert) —
+    this is the actual "decision audit" the original Phase 6 scope named,
+    aimed at the question that matters instead of unused agent
+    infrastructure. `python -m scripts.readiness_report [--history N]` and
+    phone `/readiness` both read it; only the script run appends (a phone
+    glance is a read, not a recorded check-in, matching every other
+    `portfolio_view.py` snapshot's read-only boundary).
+  - Purely a reporting/decision-support feature by design: it informs the
+    real-capital go/no-go call, it does not gate or automate any part of
+    it — no coupling to `mode: live` or any execution path.
+  - 13 new tests (`tests/unit/test_readiness.py`).
 
 221 tests pass (offline, no creds).
 

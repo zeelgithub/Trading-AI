@@ -36,7 +36,7 @@ from src.common.config import load_config
 from src.common.logging import get_logger
 from src.common.secrets import load_notification_credentials
 from src.core.orchestrator import Orchestrator
-from src.core.portfolio_view import positions_snapshot, scoreboard_snapshot
+from src.core.portfolio_view import positions_snapshot, readiness_snapshot, scoreboard_snapshot
 from src.core.proposals import ProposalStore
 from src.core.rotation import RotationService
 from src.core.symbols import SymbolResolver
@@ -86,6 +86,7 @@ HELP = (
     "/ideas — discover & rank fresh buy ideas (congress + technical)\n"
     "/sources — what each discovery signal is contributing\n"
     "/strategies — scoreboard (verdicts + live P&L)\n"
+    "/readiness — real-capital go/no-go scorecard\n"
     "/review — strategy brief to paste into Claude.ai\n"
     "/brief SYM — symbol brief to paste into Claude.ai\n"
     "/rotate <enable|disable|reweight> SYM [w] — propose a rotation\n"
@@ -211,6 +212,8 @@ class Listener:
             self._send(chat_id, source_summary(DiscoveryLedger().summarize()))
         elif cmd in ("strategies", "scoreboard"):
             self._show_strategies(chat_id)
+        elif cmd == "readiness":
+            self._show_readiness(chat_id)
         elif cmd == "review":
             self._run_review(chat_id)
         elif cmd == "brief":
@@ -694,6 +697,24 @@ class Listener:
                 f"{s['strategy']}: {s['verdict'].upper()}  "
                 f"PSR {s['psr']:.2f} p{s['p_value']:.2f} ({s['num_trades']}t){live}"
             )
+        self._send(chat_id, "\n".join(lines))
+
+    def _show_readiness(self, chat_id) -> None:
+        """Real-capital go/no-go scorecard (docs/ROADMAP.md Step 7). Read-only
+        display -- run `python -m scripts.readiness_report` to record a check
+        into the persisted audit trail."""
+        r = readiness_snapshot()
+        label = {"ready": "✅ READY", "not_yet": "⏳ NOT YET",
+                 "insufficient_data": "📉 INSUFFICIENT DATA"}.get(r["verdict"], r["verdict"])
+        lines = [f"🎯 REAL-CAPITAL READINESS: {label}",
+                 f"track record: {r['track_record_days']} day(s)"]
+        for c in r["checks"]:
+            mark = "✅" if c["passed"] else "❌"
+            lines.append(f"{mark} {c['name']}: {c['actual']} (bar: {c['threshold']})")
+        if not r["checks"]:
+            lines.append("Not enough tracked days yet to evaluate any criteria.")
+        elif r["blocking"]:
+            lines.append("blocking: " + ", ".join(r["blocking"]))
         self._send(chat_id, "\n".join(lines))
 
     def _run_review(self, chat_id) -> None:
