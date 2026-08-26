@@ -117,6 +117,35 @@ def test_settle_partial_fill():
     assert pos.filled_qty == 20            # act on filled, not ordered
 
 
+def test_recheck_partial_fill_raises_when_more_has_filled():
+    """A resting stop sized for the first partial fill (20/50) doesn't
+    magically grow if the order keeps filling -- recheck_partial_fill must
+    catch that and halt (rule 4/3), not silently accept it."""
+    broker = FakeBroker(auto_fill=False)
+    om = OrderManager(broker)
+    pos = om.open_position(make_decision(qty=50), make_ratchet(), tag="t1")
+    broker.set_fill(pos.entry_order_id, 20, status="partially_filled")
+    om.settle(pos)
+    assert pos.status == PositionStatus.OPEN and pos.filled_qty == 20
+
+    broker.set_fill(pos.entry_order_id, 35, status="partially_filled")
+    with pytest.raises(RuntimeError, match="entry filled further"):
+        om.recheck_partial_fill(pos)
+
+
+def test_recheck_partial_fill_is_a_noop_when_nothing_changed():
+    broker = FakeBroker(auto_fill=False)
+    om = OrderManager(broker)
+    pos = om.open_position(make_decision(qty=50), make_ratchet(), tag="t1")
+    broker.set_fill(pos.entry_order_id, 20, status="partially_filled")
+    om.settle(pos)
+
+    om.recheck_partial_fill(pos)  # same 20 filled -- must not raise
+
+    assert pos.filled_qty == 20
+    assert pos.status == PositionStatus.OPEN
+
+
 def test_raise_stop_replaces_leg():
     broker = FakeBroker()
     om = OrderManager(broker)

@@ -23,10 +23,7 @@ from src.research.backtester import Backtester
 
 def main() -> None:
     config = load_config()
-    # Same default as scripts.evaluate_strategies: the wider research universe
-    # when configured, else the live watchlist.
-    default_symbols = list(config.get("settings.research.backtest_universe", None)
-                           or config.enabled_symbols())
+    default_symbols = config.research_universe()
     parser = argparse.ArgumentParser(description="Run the event-driven backtester.")
     parser.add_argument("--symbols", nargs="+", default=None,
                         help=f"symbols to backtest (default: research universe, "

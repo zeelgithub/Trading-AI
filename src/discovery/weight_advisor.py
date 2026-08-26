@@ -39,12 +39,13 @@ Boundary: reads the ledger only; proposes only; places orders NO.
 from __future__ import annotations
 
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from src.common.jsonio import atomic_write_json, load_json_or_quarantine
 from src.common.logging import get_logger
+from src.common.record_store import DEFAULT_RECOMMENDATION_EXPIRY_MINUTES, JsonRecordStore
 from src.discovery.ledger import DiscoveryLedger, SourceStats
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -185,7 +186,8 @@ class WeightProposal:
     expiry_ts: str = ""
 
     @classmethod
-    def create(cls, weights: dict[str, float], rationale: str = "", expiry_minutes: int = 10080):
+    def create(cls, weights: dict[str, float], rationale: str = "",
+              expiry_minutes: int = DEFAULT_RECOMMENDATION_EXPIRY_MINUTES):
         now = _utcnow()
         return cls(
             id=f"wgt-{now.strftime('%Y%m%d')}-{uuid.uuid4().hex[:6]}",
@@ -207,40 +209,9 @@ class WeightProposal:
         return f"reweight sources -> {head}" + (f"  ({self.rationale})" if self.rationale else "")
 
 
-class WeightProposalStore:
+class WeightProposalStore(JsonRecordStore[WeightProposal]):
     def __init__(self, path: str | Path = DEFAULT_PROPOSALS_PATH) -> None:
-        self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-
-    def _load_raw(self) -> dict[str, dict]:
-        payload, quarantined = load_json_or_quarantine(self.path)
-        if quarantined is not None:
-            get_logger("weight_advisor").error(
-                "discovery weight proposals corrupt; moved to %s and starting empty", quarantined)
-            return {}
-        return payload or {}
-
-    def _save_raw(self, payload: dict[str, dict]) -> None:
-        atomic_write_json(self.path, payload)
-
-    def add(self, proposal: WeightProposal) -> None:
-        payload = self._load_raw()
-        payload[proposal.id] = asdict(proposal)
-        self._save_raw(payload)
-
-    def get(self, proposal_id: str) -> WeightProposal | None:
-        raw = self._load_raw().get(proposal_id)
-        return WeightProposal(**raw) if raw else None
-
-    def list_pending(self) -> list[WeightProposal]:
-        out = [WeightProposal(**d) for d in self._load_raw().values()]
-        return [p for p in out if p.status == "pending" and not p.is_expired()]
-
-    def mark(self, proposal_id: str, status: str) -> None:
-        payload = self._load_raw()
-        if proposal_id in payload:
-            payload[proposal_id]["status"] = status
-            self._save_raw(payload)
+        super().__init__(path, WeightProposal, log_name="weight_advisor")
 
 
 # --- service (ledger -> suggest -> propose -> approve/deny) --------------------
@@ -259,7 +230,7 @@ class DiscoveryWeightService:
         state_store: DiscoveryWeightStateStore | None = None,
         proposal_store: WeightProposalStore | None = None,
         min_sample_size: int = MIN_SAMPLE_SIZE,
-        expiry_minutes: int = 10080,
+        expiry_minutes: int = DEFAULT_RECOMMENDATION_EXPIRY_MINUTES,
     ) -> None:
         self.active_sources = frozenset(active_sources)
         self.default_weights = dict(default_weights)
@@ -306,6 +277,8 @@ class DiscoveryWeightService:
         p = self.proposal_store.get(proposal_id)
         if p is None:
             return {"ok": False, "error": "proposal not found"}
+        if p.status != "pending":
+            return {"ok": False, "error": f"already {p.status}"}
         self.proposal_store.mark(proposal_id, "denied")
         return {"ok": True, "summary": f"denied: {p.summary()}"}
 

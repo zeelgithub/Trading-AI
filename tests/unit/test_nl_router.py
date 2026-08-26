@@ -79,3 +79,29 @@ def test_falls_back_when_agent_returns_no_json():
 
 def test_no_fallback_returns_none_when_unavailable():
     assert NLCommandParser(available=False).parse("anything") is None
+
+
+# --- audit wiring ---
+
+class _FakeAudit:
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict]] = []
+
+    def record(self, event: str, **fields) -> None:
+        self.events.append((event, fields))
+
+
+def test_audit_is_recorded_for_a_dispatched_nl_command():
+    """Regression guard: NLCommandParser used to hand-roll its own Dispatcher
+    construction without an `audit` param at all, unlike StrategyAnalyst/
+    AnomalyTriage -- so every NL-parsed phone command was silently missing
+    from the audit trail the other two agent facades already got. Now built
+    via src.agents.dispatch.build_dispatcher, same as both of those."""
+    audit = _FakeAudit()
+    p = NLCommandParser(
+        model_factory=lambda model_id: ScriptedModel([text_response('{"cmd":"status"}')]),
+        available=True,
+        audit=audit,
+    )
+    p.parse("how's my book?")
+    assert ("agent_dispatch", {"kind": "nl_command", "profile": "nl_router"}) in audit.events

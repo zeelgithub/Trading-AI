@@ -59,6 +59,28 @@ def test_fetch_posts_requests_token_then_listing(monkeypatch):
     assert calls[1][2]["headers"]["Authorization"] == "Bearer tok123"
 
 
+def test_fetch_posts_retries_a_transient_network_error(monkeypatch):
+    """Regression guard: the raw requests.post/get calls used to have no
+    retry at all, unlike src/data/providers/alpaca_data.py's equivalent bar
+    fetch. Both now go through src.common.errors.retry_transient -- a single
+    ConnectionError (recognized as transient) must be retried, not raised."""
+    calls = {"n": 0}
+
+    def flaky_post(url, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ConnectionError("transient blip")
+        return _FakeResponse({"access_token": "tok123", "expires_in": 3600})
+
+    monkeypatch.setattr("requests.post", flaky_post)
+    monkeypatch.setattr("requests.get", lambda *a, **k: _FakeResponse(_listing([])))
+
+    posts = RedditAppOnly(creds=_creds()).fetch_posts("stocks")
+
+    assert posts == []
+    assert calls["n"] == 2  # first attempt failed transiently, retry succeeded
+
+
 def test_token_is_cached_across_calls(monkeypatch):
     token_calls = []
 

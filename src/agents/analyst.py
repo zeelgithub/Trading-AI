@@ -15,8 +15,8 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from src.agents.catalog import STRATEGY_ANALYST
-from src.agents.dispatch import AgentRequest, Dispatcher
-from src.agents.model import AnthropicModel, ModelClient
+from src.agents.dispatch import AgentRequest, Dispatcher, build_dispatcher
+from src.agents.model import ModelClient
 from src.agents.runtime import AgentResult
 from src.agents.tools.base import ToolRegistry
 from src.agents.tools.reads import build_read_registry
@@ -54,12 +54,11 @@ class StrategyAnalyst:
 
     def _dispatch(self) -> Dispatcher:
         if self._dispatcher is None:
-            factory = self._model_factory or (lambda model_id: AnthropicModel(model_id))
-            self._dispatcher = Dispatcher(
+            self._dispatcher = build_dispatcher(
                 profiles={"strategy_analyst": STRATEGY_ANALYST},
                 registry=self.registry,
-                model_factory=factory,
                 routes={"strategy_review": "strategy_analyst"},
+                model_factory=self._model_factory,
                 audit=self.audit,
             )
         return self._dispatcher

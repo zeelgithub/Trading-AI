@@ -66,6 +66,30 @@ class Config:
         watch = self.symbols.get("watchlist", []) or []
         return [w["symbol"] for w in watch if w.get("enabled", True)]
 
+    def watchlist_entry(self, symbol: str) -> dict[str, Any] | None:
+        """The raw symbols.yaml watchlist row for `symbol`, or None if it
+        isn't on the watchlist. Case-sensitive exact match. Shared lookup for
+        the two call sites that used to each hand-roll this same scan
+        (Strategy.shorts_allowed, RiskManager._max_position_pct)."""
+        for w in self.symbols.get("watchlist", []) or []:
+            if w.get("symbol") == symbol:
+                return w
+        return None
+
+    def research_universe(self) -> list[str]:
+        """settings.research.backtest_universe if configured (the wider,
+        survivorship-bias-corrected universe research tooling evaluates
+        against), else the live watchlist. Shared default previously
+        duplicated verbatim in scripts/evaluate_strategies.py and
+        scripts/run_backtest.py."""
+        return list(self.get("settings.research.backtest_universe", None) or self.enabled_symbols())
+
+    def data_lookback_days(self) -> int:
+        """settings.data.lookback_days, defaulting to 400 (enough history for
+        the 200-day EMA + warmup, see settings.yaml's own comment). Shared
+        default previously duplicated across five independent call sites."""
+        return int(self.get("settings.data.lookback_days", 400))
+
 
 @lru_cache(maxsize=1)
 def load_config(config_dir: str | None = None) -> Config:

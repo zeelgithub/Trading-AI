@@ -205,6 +205,39 @@ def test_discovery_missing_block_uses_defaults():
     validate_config(GOOD_SETTINGS, GOOD_RISK)  # no "discovery" key at all -- must not raise
 
 
+# --- account correlated-risk fields + gap_slippage_alert_pct (previously
+# unvalidated -- see config_schema.py's AccountLimits/AlertsSettings) --------
+
+def test_correlated_risk_threshold_out_of_range_is_rejected():
+    bad = {"account": {"correlated_risk_threshold": 1.5}}  # must be <= 1
+    with pytest.raises(ConfigError, match="correlated_risk_threshold"):
+        validate_config(GOOD_SETTINGS, bad)
+
+
+def test_correlation_lookback_days_wrong_type_is_rejected():
+    bad = {"account": {"correlation_lookback_days": "sixty"}}
+    with pytest.raises(ConfigError, match="correlation_lookback_days"):
+        validate_config(GOOD_SETTINGS, bad)
+
+
+def test_max_correlated_risk_pct_negative_is_rejected():
+    bad = {"account": {"max_correlated_risk_pct": -1.0}}
+    with pytest.raises(ConfigError, match="max_correlated_risk_pct"):
+        validate_config(GOOD_SETTINGS, bad)
+
+
+def test_gap_slippage_alert_pct_negative_is_rejected():
+    bad_settings = {**GOOD_SETTINGS, "alerts": {"gap_slippage_alert_pct": -1.0}}
+    with pytest.raises(ConfigError, match="gap_slippage_alert_pct"):
+        validate_config(bad_settings, GOOD_RISK)
+
+
+def test_account_correlated_risk_fields_valid_passes():
+    good = {"account": {"max_daily_loss_pct": 4.0, "correlated_risk_threshold": 0.6,
+                        "correlation_lookback_days": 60, "max_correlated_risk_pct": 2.5}}
+    validate_config(GOOD_SETTINGS, good)  # must not raise
+
+
 # --- cross-process locking ------------------------------------------------
 
 def test_bot_lock_serializes_and_times_out(tmp_path):

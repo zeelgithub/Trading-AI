@@ -209,19 +209,25 @@ class DiscoveryPipeline:
     def _size_and_propose(
         self, cand: Candidate, account: Account, exposure: ExposureSnapshot, skipped: list
     ) -> Proposal | None:
-        strategy, entry, stop = self._levels(cand)
+        strategy, entry, stop, side = self._levels(cand)
         if entry is None or entry <= 0:
             skipped.append((cand.symbol, "no price"))
             return None
         if entry < self.min_price:
             skipped.append((cand.symbol, f"below min price floor (${self.min_price:g})"))
             return None
-        if stop <= 0 or stop >= entry:
+        # A long's stop sits below entry; a short's sits above -- side-aware,
+        # not hardcoded long, so a genuine short technical setup (side
+        # already validated by the strategy that generated it, see
+        # _levels()) isn't silently dropped here as "invalid".
+        invalid_stop = stop <= 0 or (stop >= entry if side == Side.LONG else stop <= entry)
+        if invalid_stop:
             skipped.append((cand.symbol, "invalid stop"))
             return None
 
         intent = Intent(
-            symbol=cand.symbol, strategy=strategy, side=Side.LONG, action=Action.BUY,
+            symbol=cand.symbol, strategy=strategy, side=side,
+            action=Action.BUY if side == Side.LONG else Action.SHORT,
             confidence=min(1.0, cand.score / 100.0),
             entry_price=round(entry, 2), stop_loss=round(stop, 2),
         )
@@ -258,23 +264,32 @@ class DiscoveryPipeline:
             ratchet_params=ratchet_params, atr=atr, expiry_minutes=self.expiry_minutes,
         )
 
-    def _levels(self, cand: Candidate) -> tuple[str, float | None, float]:
-        """Resolve (strategy, entry, stop). A technical contribution brings its
-        own plan; a congress-only idea uses last price + the default stop."""
+    def _levels(self, cand: Candidate) -> tuple[str, float | None, float, Side]:
+        """Resolve (strategy, entry, stop, side). A technical contribution
+        brings its own plan -- including which side it's actually trading
+        (`shorts_allowed()` is already enforced inside the strategy that
+        generated it, so a short contribution here was already validated as
+        short-eligible, not a new bypass). Congress-only ideas track
+        disclosed BUYs, so they're always long, priced live."""
         tech = cand.contribution("technical")
         if tech is not None:
             entry = tech.meta.get("entry_price")
             stop = tech.meta.get("stop_loss")
             strategy = tech.meta.get("strategy", "discovery")
+            side = Side(tech.meta.get("side", Side.LONG.value))
             if entry and stop:
-                return strategy, float(entry), float(stop)
+                return strategy, float(entry), float(stop), side
             if entry:
-                return strategy, float(entry), float(entry) * (1 - self.default_stop_pct / 100.0)
+                entry = float(entry)
+                pct = self.default_stop_pct / 100.0
+                default_stop = entry * (1 - pct) if side == Side.LONG else entry * (1 + pct)
+                return strategy, entry, default_stop, side
         # Congress-only (or technical without levels): price it live.
         price = self.price_fn(cand.symbol)
         if price is None or price <= 0:
-            return "congress_copy", None, 0.0
-        return "congress_copy", float(price), float(price) * (1 - self.default_stop_pct / 100.0)
+            return "congress_copy", None, 0.0, Side.LONG
+        return ("congress_copy", float(price),
+               float(price) * (1 - self.default_stop_pct / 100.0), Side.LONG)
 
 
 def _exposure(positions: dict) -> ExposureSnapshot:

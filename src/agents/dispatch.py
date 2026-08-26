@@ -17,7 +17,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from src.agents.model import ModelClient
+from src.agents.model import AnthropicModel, ModelClient
 from src.agents.profiles import AgentProfile
 from src.agents.runtime import AgentResult, run_agent
 from src.agents.tools.base import ToolRegistry
@@ -62,3 +62,23 @@ class Dispatcher:
             self.audit.record("agent_dispatch", kind=request.kind, profile=profile_name)
         return run_agent(profile, request.payload, model=model,
                          registry=self.registry, audit=self.audit)
+
+
+def build_dispatcher(
+    profiles: dict[str, AgentProfile],
+    registry: ToolRegistry,
+    routes: dict[str, str] | None = None,
+    *,
+    model_factory: ModelFactory | None = None,
+    audit=None,
+) -> Dispatcher:
+    """The one place every cognitive-plane facade (NLCommandParser,
+    StrategyAnalyst, AnomalyTriage, ...) builds its Dispatcher -- each used
+    to hand-roll this identically, and the copies had already drifted:
+    NLCommandParser's copy never wired `audit` through, so NL-parsed phone
+    commands were silently missing from the audit trail the other two
+    facades' dispatches already got. `model_factory` defaults to a real
+    AnthropicModel per model id, same default every facade already used."""
+    factory = model_factory or (lambda model_id: AnthropicModel(model_id))
+    return Dispatcher(profiles=profiles, registry=registry, model_factory=factory,
+                      routes=routes, audit=audit)

@@ -34,18 +34,12 @@ def test_atomic_write_and_load_roundtrip(tmp_path):
     assert not list(tmp_path.glob("*.tmp"))          # no temp litter
 
 
-def test_atomic_write_text_roundtrip_no_tmp_litter(tmp_path):
+def test_atomic_write_text_roundtrip_overwrites_no_tmp_litter(tmp_path):
     path = tmp_path / "generated.py"
+    path.write_text("stale content that should not survive\n", encoding="utf-8")
     atomic_write_text(path, 'TICKERS = ["AAPL", "MSFT"]\n')
     assert path.read_text(encoding="utf-8") == 'TICKERS = ["AAPL", "MSFT"]\n'
     assert not list(tmp_path.glob("*.tmp"))          # no temp litter
-
-
-def test_atomic_write_text_overwrites_existing_file(tmp_path):
-    path = tmp_path / "generated.py"
-    path.write_text("stale content that should not survive\n", encoding="utf-8")
-    atomic_write_text(path, "fresh content\n")
-    assert path.read_text(encoding="utf-8") == "fresh content\n"
 
 
 def test_corrupt_file_is_quarantined_not_trusted(tmp_path):

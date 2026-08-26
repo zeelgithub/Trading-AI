@@ -43,6 +43,14 @@ class AccountLimits(_Lenient):
     max_open_risk_pct: float | None = Field(None, gt=0, le=100)
     max_gross_exposure_pct: float = Field(175.0, gt=0)
     max_open_positions: int = Field(10, gt=0)
+    # Correlated-cluster risk cap (RiskManager.evaluate() step 7.6,
+    # src/risk/correlation.py) -- see risk_limits.yaml's own comment for the
+    # full rationale. Defaults mirror the code's existing fallbacks
+    # (max_correlated_risk_pct falls back to max_open_risk_pct * 0.6 in code,
+    # so it has no fixed default here).
+    max_correlated_risk_pct: float | None = Field(None, gt=0, le=100)
+    correlated_risk_threshold: float = Field(0.6, gt=0, le=1)
+    correlation_lookback_days: int = Field(60, gt=0)
 
 
 class PositionLimits(_Lenient):
@@ -132,11 +140,25 @@ class WatchdogSettings(_Lenient):
 class ApprovalSettings(_Lenient):
     require_approval: bool = True
     proposal_expiry_minutes: int = Field(1080, gt=0)
+    # Shared by strategy rotation (src/core/rotation.py) and discovery source
+    # reweighting (src/discovery/weight_advisor.py) -- both are pending, non-
+    # trade agent RECOMMENDATIONS awaiting a phone Approve/Deny, distinct from
+    # proposal_expiry_minutes above (trade proposals). Default matches what
+    # was previously a hardcoded 10080 (1 week) independently repeated in both
+    # modules.
+    recommendation_expiry_minutes: int = Field(10080, gt=0)
+    # RotationService's reweight guardrail -- a proposed weight outside
+    # [0, rotation_max_weight] is rejected at propose AND approve time.
+    rotation_max_weight: float = Field(1.0, gt=0)
 
 
 class AlertsSettings(_Lenient):
     enabled: bool = True
     events: list[str] = Field(default_factory=list)
+    # Real-fill-price gap-detection threshold (Orchestrator, see
+    # settings.yaml's own comment for why this exists alongside the
+    # stop-market order-type choice).
+    gap_slippage_alert_pct: float = Field(2.0, gt=0)
 
 
 class ResearchSettings(_Lenient):

@@ -27,10 +27,10 @@ class FakeSource:
         return list(self._contributions)
 
 
-def _tech(symbol, score, *, entry, stop, strategy="trend_following"):
+def _tech(symbol, score, *, entry, stop, strategy="trend_following", side="long"):
     return SignalContribution(symbol, "technical", score, f"{strategy} setup",
                               meta={"strategy": strategy, "entry_price": entry,
-                                    "stop_loss": stop, "atr": None})
+                                    "stop_loss": stop, "atr": None, "side": side})
 
 
 def _congress(symbol, score):
@@ -102,6 +102,35 @@ def test_invalid_stop_is_skipped():
     report = _pipeline([_tech("DDD", 0.8, entry=100.0, stop=100.0)]).run(ACCOUNT, {})
     assert report.proposals == []
     assert any(sym == "DDD" for sym, _ in report.skipped)
+
+
+def test_short_technical_setup_produces_a_short_proposal_not_dropped():
+    """Regression guard: _levels()/_size_and_propose() used to hardcode
+    Side.LONG/Action.BUY for every technical contribution, and the "invalid
+    stop" check (stop >= entry) was written only for the long convention --
+    a genuine short setup (stop ABOVE entry, e.g. entry=100/stop=110) was
+    silently dropped as "invalid stop" instead of being proposed as a short.
+    shorts_allowed() is already enforced inside the strategy that generated
+    this contribution (see TechnicalSource), so this isn't a new bypass --
+    just correctly passing through an already-validated short."""
+    report = _pipeline(
+        [_tech("EEE", 0.8, entry=100.0, stop=110.0, side="short")]
+    ).run(ACCOUNT, {})
+    assert report.proposals != []
+    prop = next(p for p in report.proposals if p.symbol == "EEE")
+    assert prop.intent["signal"] == "SHORT"
+    assert prop.intent["stop_loss"] == 110.0
+
+
+def test_short_technical_setup_with_stop_on_wrong_side_is_still_skipped():
+    """A short's stop must be ABOVE entry -- stop below entry for a short is
+    genuinely invalid (not just "invalid for a long"), and must still be
+    skipped, not silently accepted now that shorts are supported."""
+    report = _pipeline(
+        [_tech("FFF", 0.8, entry=100.0, stop=90.0, side="short")]
+    ).run(ACCOUNT, {})
+    assert report.proposals == []
+    assert any(sym == "FFF" for sym, _ in report.skipped)
 
 
 def test_penny_stock_priced_candidate_is_skipped_below_default_floor():

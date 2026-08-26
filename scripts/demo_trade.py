@@ -20,9 +20,24 @@ from src.common.config import load_config
 from src.common.models import Action, Intent, Side
 from src.data.providers.alpaca_data import AlpacaData
 from src.execution.broker_alpaca import AlpacaAccountReader, exit_side
-from src.execution.order_manager import _coid
+from src.execution.order_manager import coid
 from src.risk.ratchet_stop import build_ratchet
 from src.risk.risk_manager import AccountState, RiskManager
+
+
+def _account_state(acct, positions: list, price: float) -> AccountState:
+    """Real open-position count + gross exposure from the account's actual
+    holdings, matching scripts/scan_signals.py's pattern -- this demo used
+    to hardcode both to zero regardless of what the account actually held,
+    so the risk gate it claims to run "for real" never saw a portfolio-level
+    veto (gross exposure, correlation) even when the account was already at
+    its cap."""
+    gross_exposure = sum(p.qty * p.avg_entry_price for p in positions)
+    return AccountState(
+        equity=acct.equity, start_of_day_equity=acct.last_equity,
+        buying_power=acct.buying_power, last_price=price,
+        open_positions=len(positions), gross_exposure_value=gross_exposure,
+    )
 
 
 def main() -> None:
@@ -32,7 +47,9 @@ def main() -> None:
 
     config = load_config()
     price = float(AlpacaData().get_daily_bars(symbol, lookback_days=10).iloc[-1].close)
-    acct = AlpacaAccountReader().get_account()  # read-only
+    reader = AlpacaAccountReader()  # read-only
+    acct = reader.get_account()
+    positions = reader.list_positions()
 
     rp = config.risk_limits["ratchet_stop"][strategy]
     stop = round(price * (1 - rp["initial_stop_pct"] / 100.0), 2)
@@ -47,11 +64,7 @@ def main() -> None:
     print("   " + str(intent.to_dict()))
 
     print("\n=== 2. Risk gatekeeper ===")
-    account = AccountState(
-        equity=acct.equity, start_of_day_equity=acct.last_equity,
-        buying_power=acct.buying_power, last_price=price, open_positions=0,
-        gross_exposure_value=0.0,
-    )
+    account = _account_state(acct, positions, price)
     decision = RiskManager(config).evaluate(intent, account)
     risk_dollars = acct.equity * float(config.risk_limits["allocation"]["per_strategy_risk_pct"]) / 100
     max_pos_value = acct.equity * float(config.risk_limits["position"]["max_position_pct"]) / 100
@@ -69,7 +82,7 @@ def main() -> None:
     print(f"\n=== 3. Protected order the bot would submit (qty={qty:g}) ===")
     has_tp = intent.take_profit is not None
     klass = "bracket (OTOCO)" if has_tp else "OTO"
-    print(f"   order_class = {klass}  client_order_id base = {_coid(symbol, strategy, 'YYYY-MM-DD', 'entry')}")
+    print(f"   order_class = {klass}  client_order_id base = {coid(symbol, strategy, 'YYYY-MM-DD', 'entry')}")
     print(f"   leg 1 ENTRY: market BUY  {qty:g} {symbol} @ ~${price:,.2f}")
     print(f"   leg 2 STOP:  stop {exit_side(Side.LONG).value.upper()}  {qty:g} {symbol} @ ${stop:,.2f}")
     if has_tp:

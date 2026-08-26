@@ -24,18 +24,26 @@ from src.execution.broker_alpaca import build_broker
 from src.notify.telegram import build_notifier
 
 
+def _stop_kwargs(stop: float | None) -> dict:
+    """Only pass stop_pct through when the user actually set --stop, so
+    trade_service.place_manual's own default stays the single source of
+    truth instead of being independently duplicated here."""
+    return {"stop_pct": stop} if stop is not None else {}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Place a manual risk-gated buy.")
     parser.add_argument("symbol")
     parser.add_argument("qty", type=int)
-    parser.add_argument("--stop", type=float, default=10.0, help="stop-loss percent (default 10)")
+    parser.add_argument("--stop", type=float, default=None,
+                        help="stop-loss percent (defaults to place_manual's own default)")
     args = parser.parse_args()
 
     config = load_config()
     # No allow_live here: manual_order stays paper-only, matching its docs
     # ("risk-gated manual buy" -- no live-mode flag is documented for it).
     service = TradeService(broker=build_broker(config), config=config)
-    result = service.place_manual(args.symbol, args.qty, stop_pct=args.stop)
+    result = service.place_manual(args.symbol, args.qty, **_stop_kwargs(args.stop))
 
     print(result.message)
     if result.ok:

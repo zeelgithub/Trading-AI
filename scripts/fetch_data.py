@@ -19,7 +19,7 @@ from src.data.ingest import ingest_symbol
 
 def main() -> None:
     config = load_config()
-    lookback = int(config.get("settings.data.lookback_days", 400))
+    lookback = config.data_lookback_days()
     symbols = config.enabled_symbols()
 
     conn = store.connect()

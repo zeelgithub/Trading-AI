@@ -16,12 +16,11 @@ Boundary: places orders NO, holds trading credentials NO.
 from __future__ import annotations
 
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from src.common.jsonio import atomic_write_json, load_json_or_quarantine
-from src.common.logging import get_logger
+from src.common.record_store import JsonRecordStore
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_PROPOSALS_PATH = PROJECT_ROOT / "state" / "proposals.json"
@@ -94,43 +93,12 @@ class Proposal:
         )
 
 
-class ProposalStore:
+class ProposalStore(JsonRecordStore[Proposal]):
     """JSON-backed pending-proposal queue (state/proposals.json). Shared by the
     run_paper cron (writes) and the Telegram listener (reads / marks)."""
 
     def __init__(self, path: str | Path = DEFAULT_PROPOSALS_PATH) -> None:
-        self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-
-    def _load_raw(self) -> dict[str, dict]:
-        payload, quarantined = load_json_or_quarantine(self.path)
-        if quarantined is not None:
-            get_logger("proposals").error(
-                "proposals file corrupt; moved to %s and starting empty", quarantined)
-            return {}
-        return payload or {}
-
-    def _save_raw(self, payload: dict[str, dict]) -> None:
-        atomic_write_json(self.path, payload)
-
-    def add(self, proposal: Proposal) -> None:
-        payload = self._load_raw()
-        payload[proposal.id] = asdict(proposal)
-        self._save_raw(payload)
-
-    def get(self, proposal_id: str) -> Proposal | None:
-        raw = self._load_raw().get(proposal_id)
-        return Proposal(**raw) if raw else None
-
-    def list_pending(self) -> list[Proposal]:
-        out = [Proposal(**d) for d in self._load_raw().values()]
-        return [p for p in out if p.status == "pending" and not p.is_expired()]
-
-    def mark(self, proposal_id: str, status: str) -> None:
-        payload = self._load_raw()
-        if proposal_id in payload:
-            payload[proposal_id]["status"] = status
-            self._save_raw(payload)
+        super().__init__(path, Proposal, log_name="proposals")
 
     def purge_expired(self) -> int:
         """Mark still-pending but expired proposals as expired. Returns count."""

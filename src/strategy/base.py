@@ -49,10 +49,8 @@ class Strategy(ABC):
     def shorts_allowed(self, symbol: str) -> bool:
         defaults = self.config.symbols.get("defaults", {})
         fallback = bool(defaults.get("allow_short", False))
-        for w in self.config.symbols.get("watchlist", []) or []:
-            if w.get("symbol") == symbol:
-                return bool(w.get("allow_short", fallback))
-        return fallback
+        entry = self.config.watchlist_entry(symbol)
+        return bool(entry.get("allow_short", fallback)) if entry else fallback
 
     def initial_stop(self, side: Side, entry: float, atr: float | None = None) -> float:
         p = self.ratchet_params

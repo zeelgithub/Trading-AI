@@ -38,8 +38,18 @@ def rsi(close: pd.Series, period: int = 14) -> pd.Series:
     avg_loss = _wilder(loss, period)
     rs = avg_gain / avg_loss
     out = 100.0 - (100.0 / (1.0 + rs))
-    # When average loss is zero (only gains), RSI is 100 by definition.
-    out = out.where(avg_loss != 0, 100.0)
+    # avg_loss == 0 is "only gains" (RSI 100 by definition) ONLY when there
+    # were gains at all. A fully frozen series (avg_gain == 0 too -- a
+    # stalled/duplicated-close feed, zero movement whatsoever) previously
+    # also hit this branch via 0/0 == NaN, forcing RSI to 100 ("extremely
+    # overbought") instead of leaving it undefined -- left as NaN here so
+    # has_nan() guards catch a frozen feed like any other missing indicator,
+    # instead of a stale feed masquerading as a real signal (confirmed
+    # reachable: mean_reversion's touched_short also collapses bb_upper to
+    # close on a zero-variance window, so both halves of its overbought
+    # check would trip together on nothing but stale data).
+    only_gains = (avg_loss == 0) & (avg_gain > 0)
+    out = out.where(~only_gains, 100.0)
     return out
 
 

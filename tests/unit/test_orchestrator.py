@@ -93,6 +93,31 @@ def test_execute_cycle_opens_protected_positions_and_persists(tmp_path):
     assert all(p.status == PositionStatus.OPEN for p in reloaded.values())
 
 
+def test_max_open_positions_enforced_within_a_single_cycle(tmp_path):
+    """Regression guard: open_positions/correlation_closes used to be
+    snapshotted ONCE per cycle, before the per-symbol loop -- so a second or
+    third symbol signaling an entry in the SAME cycle was risk-gated against
+    stale, pre-cycle exposure, silently bypassing max_open_positions (and
+    the other exposure/correlation caps) for every entry after the first.
+    All 3 symbols signal the same approve_frame setup; capped at 1 open
+    position, only the first should actually open -- the other two must be
+    vetoed, not slip through."""
+    broker = FakeBroker(auto_fill=True)
+    config = small_universe_config()
+    tight = {**config.risk_limits,
+            "account": {**config.risk_limits["account"], "max_open_positions": 1}}
+    config = replace(config, risk_limits=tight)
+
+    report = make_orch(broker, tmp_path, execute=True, config=config).run_cycle()
+
+    assert not report.halted
+    assert len(report.opened) == 1
+    markets = [o for o in broker._orders.values() if o.type == "market"]
+    assert len(markets) == 1
+    veto_reasons = [d[1] for d in report.decisions if d[1] == "veto"]
+    assert len(veto_reasons) == 2  # the other two symbols correctly blocked
+
+
 def test_halted_bot_is_a_noop(tmp_path):
     broker = FakeBroker()
     orch = make_orch(broker, tmp_path, execute=True)

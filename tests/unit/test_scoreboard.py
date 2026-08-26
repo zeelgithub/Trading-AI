@@ -69,3 +69,25 @@ def test_scoreboard_clamps_infinite_profit_factor(tmp_path):
     sb = Scoreboard(tmp_path / "sb.json")
     sb.upsert(StrategyScore(strategy="a", profit_factor=float("inf")))
     assert sb.load()["a"].profit_factor == 999.0
+
+
+def test_scoreboard_corrupt_file_is_quarantined_not_crashed(tmp_path):
+    """Regression guard: save()/load() used to bypass this codebase's
+    established atomic-write/quarantine pattern (unlike every sibling state
+    file -- proposals, rotation, weight_advisor, equity_history) -- a crash
+    mid-write left a truncated scoreboard.json that load() would raise
+    json.JSONDecodeError on, uncaught, instead of recovering."""
+    path = tmp_path / "sb.json"
+    path.write_text('{"a": {"strategy": "a"', encoding="utf-8")  # truncated
+
+    loaded = Scoreboard(path).load()
+
+    assert loaded == {}
+    assert not path.exists()  # moved aside, not left in place
+    assert list(tmp_path.glob("sb.json.corrupt-*"))
+
+
+def test_scoreboard_save_writes_atomically_no_tmp_litter(tmp_path):
+    sb = Scoreboard(tmp_path / "sb.json")
+    sb.upsert(StrategyScore(strategy="a"))
+    assert not list(tmp_path.glob("*.tmp"))

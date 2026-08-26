@@ -201,6 +201,7 @@ class Orchestrator:
                 # 0. Settle pending fills so reconcile + sizing act on filled_qty.
                 if self.execute:
                     self._settle_pending()
+                    self._recheck_partial_fills()
 
                 # 1. Reconcile -- broker is source of truth (pending-aware).
                 rec = self.reconciler.reconcile(self.positions)
@@ -395,6 +396,17 @@ class Orchestrator:
                 self.log.warning("entry for %s was %s -- dropping", symbol, pos.last_order_status)
                 del self.positions[symbol]
 
+    def _recheck_partial_fills(self) -> None:
+        """See OrderManager.recheck_partial_fill's docstring: settle() marks
+        a position OPEN and protects it the moment ANY fill is confirmed,
+        but never revisits it -- this catches an entry order that kept
+        filling afterward, before the gap can go unprotected for another
+        full cycle. Raises (halting, rule 3) if it finds one; that's the
+        intended behavior here, not swallowed like a per-symbol entry error."""
+        for pos in self.positions.values():
+            if pos.status == PositionStatus.OPEN and pos.filled_qty < pos.qty:
+                self.order_manager.recheck_partial_fill(pos)
+
     def _bar_age(self, feats) -> int | None:
         from src.data.ingest import last_bar_age_days  # lazy: keep tests offline-light
 
@@ -545,14 +557,35 @@ class Orchestrator:
                 self._propose(decision, gated, feats, report)
             elif self.execute:
                 self._open(decision, gated, feats, report)
+                # open_positions/correlation_closes are snapshotted ONCE per
+                # cycle by the caller (run_cycle), before this per-symbol
+                # loop -- without this, a second symbol entered in the SAME
+                # cycle would be risk-gated against stale, pre-cycle
+                # exposure, silently bypassing max_open_positions/
+                # max_gross_exposure_pct/max_open_risk_pct/the correlated-
+                # risk cap for every entry after the first. Only for a real
+                # open (self.propose doesn't touch self.positions yet, so
+                # there's no real exposure to add for a pending proposal).
+                opened = self.positions.get(symbol)
+                if opened is not None and opened.status != PositionStatus.CLOSED:
+                    open_positions.append(opened)
+                    correlation_closes[symbol] = feats["close"]
             else:
                 report.opened.append(symbol)  # would open (shadow)
 
-    def _open(self, decision, intent, feats, report: CycleReport) -> None:
+    def _build_ratchet(self, intent, feats):
+        """The one place that turns an approved intent + its feature row into
+        a ratchet_params/entry/atr/ratchet tuple -- shared by _open (a real
+        fill) and _propose (a Proposal awaiting phone approval), which
+        previously each hand-rolled this identical 4-line block."""
         ratchet_params = self.config.risk_limits.get("ratchet_stop", {}).get(intent.strategy, {})
         entry = intent.entry_price or float(feats.iloc[-1].close)
         atr = float(feats.iloc[-1].atr) if "atr_multiple_initial" in ratchet_params else None
         ratchet = build_ratchet(intent.strategy, ratchet_params, entry, intent.side, atr=atr)
+        return ratchet_params, entry, atr, ratchet
+
+    def _open(self, decision, intent, feats, report: CycleReport) -> None:
+        _, entry, _, ratchet = self._build_ratchet(intent, feats)
         pos = self.order_manager.open_position(decision, ratchet, tag=date.today().isoformat())
         self.order_manager.settle(pos)  # confirm the fill (market entry)
         self.risk.on_order_submitted()
@@ -564,10 +597,7 @@ class Orchestrator:
     def _propose(self, decision, intent, feats, report: CycleReport) -> None:
         """Propose-and-approve: record a risk-approved entry as a Proposal and
         emit it (no order placed). The human approves later from the phone."""
-        ratchet_params = self.config.risk_limits.get("ratchet_stop", {}).get(intent.strategy, {})
-        entry = intent.entry_price or float(feats.iloc[-1].close)
-        atr = float(feats.iloc[-1].atr) if "atr_multiple_initial" in ratchet_params else None
-        ratchet = build_ratchet(intent.strategy, ratchet_params, entry, intent.side, atr=atr)
+        ratchet_params, entry, atr, ratchet = self._build_ratchet(intent, feats)
         wire = intent.to_dict()
         wire["entry_price"] = round(entry, 2)
         wire["stop_loss"] = round(ratchet.stop, 2)

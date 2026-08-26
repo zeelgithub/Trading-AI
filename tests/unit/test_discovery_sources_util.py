@@ -5,6 +5,8 @@ extraction patterns each source used to hand-roll independently."""
 
 from __future__ import annotations
 
+import threading
+
 import pandas as pd
 import pytest
 
@@ -17,20 +19,12 @@ from src.discovery.sources._util import (
 )
 
 
-def test_safe_call_returns_result_on_success():
-    assert safe_call(lambda x: x + 1, 1) == 2
+def test_safe_call_passes_through_result_and_fails_soft_on_exception():
+    assert safe_call(lambda a, b, c=None: (a, b, c), 1, 2, c=3) == (1, 2, 3)
 
-
-def test_safe_call_returns_none_on_exception():
     def boom():
         raise RuntimeError("network blew up")
     assert safe_call(boom) is None
-
-
-def test_safe_call_passes_args_and_kwargs():
-    def fn(a, b, c=None):
-        return (a, b, c)
-    assert safe_call(fn, 1, 2, c=3) == (1, 2, 3)
 
 
 def test_fetch_concurrent_collects_all_non_none_results():
@@ -45,22 +39,12 @@ def test_fetch_concurrent_empty_items():
     assert fetch_concurrent([], lambda x: x, max_workers=4) == []
 
 
-def test_fetch_concurrent_propagates_unhandled_exception():
-    def boom(x):
-        raise ValueError("not fail-soft")
-
-    with pytest.raises(ValueError):
-        fetch_concurrent([1], boom, max_workers=2)
-
-
-def test_fetch_concurrent_processes_remaining_items_after_one_raises():
-    """One item's exception must not stop the others from being processed --
-    matches the old ThreadPoolExecutor+as_completed behavior (the `with`
-    block still drained every submitted future before propagating). Matters
-    because fetch_one is only NOT fail-soft here in this adversarial test;
-    every real caller already wraps its own call in safe_call."""
-    import threading
-
+def test_fetch_concurrent_propagates_exception_after_processing_the_rest():
+    """One item's exception must not stop the others from being processed,
+    but the caller still sees it -- matches the old ThreadPoolExecutor+
+    as_completed behavior. fetch_one is only NOT fail-soft here in this
+    adversarial test; every real caller already wraps its own call in
+    safe_call."""
     processed: list[int] = []
     lock = threading.Lock()
 
@@ -78,8 +62,6 @@ def test_fetch_concurrent_processes_remaining_items_after_one_raises():
 
 
 def test_fetch_concurrent_uses_at_most_min_max_workers_and_item_count_threads():
-    import threading
-
     seen_thread_ids = set()
     lock = threading.Lock()
 
@@ -110,6 +92,7 @@ def test_fetch_concurrent_does_not_block_process_exit_when_one_item_hangs():
     outer daemon thread is abandoned."""
     import subprocess
     import sys
+    import time
     from pathlib import Path
 
     repo_root = Path(__file__).resolve().parents[2]
@@ -130,56 +113,36 @@ t.start()
 time.sleep(0.2)
 print("outer daemon thread abandoned -- main returning now")
 """
-    import time as _time
-    start = _time.monotonic()
+    start = time.monotonic()
     result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
                             timeout=15, cwd=repo_root)
-    elapsed = _time.monotonic() - start
+    elapsed = time.monotonic() - start
     assert result.returncode == 0, result.stderr
     assert "outer daemon thread abandoned" in result.stdout
     assert elapsed < 2.0, f"process took {elapsed:.2f}s to exit -- nested hang blocked shutdown"
 
 
-def test_percentile_rank_empty():
+def test_percentile_rank_orders_and_handles_empty_and_ties():
     assert percentile_rank({}) == {}
 
-
-def test_percentile_rank_orders_low_to_high():
     ranked = percentile_rank({"A": 1.0, "B": 3.0, "C": 2.0})
     assert ranked["A"] < ranked["C"] < ranked["B"]
     assert ranked["B"] == 1.0  # highest value -> top percentile
 
-
-def test_percentile_rank_ties_share_rank():
-    ranked = percentile_rank({"A": 5.0, "B": 5.0})
-    assert ranked["A"] == ranked["B"]
+    tied = percentile_rank({"A": 5.0, "B": 5.0})
+    assert tied["A"] == tied["B"]
 
 
-def test_clip_text_short_string_unchanged():
+def test_clip_text_strips_and_truncates_with_ellipsis():
     assert clip_text("short") == "short"
+    assert clip_text("  padded  ") == "padded"
 
-
-def test_clip_text_truncates_with_ellipsis():
-    text = "x" * 100
-    clipped = clip_text(text, n=60)
+    clipped = clip_text("x" * 100, n=60)
     assert len(clipped) == 60
     assert clipped.endswith("…")
 
 
-def test_clip_text_strips_whitespace_first():
-    assert clip_text("  padded  ") == "padded"
-
-
-def test_safe_num_missing_column():
-    row = pd.Series({"a": 1.0})
-    assert safe_num(row, "missing") is None
-
-
-def test_safe_num_nan_value():
-    row = pd.Series({"a": float("nan")})
-    assert safe_num(row, "a") is None
-
-
-def test_safe_num_extracts_float():
-    row = pd.Series({"a": 5})
-    assert safe_num(row, "a") == 5.0
+def test_safe_num_extracts_missing_nan_and_valid():
+    assert safe_num(pd.Series({"a": 1.0}), "missing") is None
+    assert safe_num(pd.Series({"a": float("nan")}), "a") is None
+    assert safe_num(pd.Series({"a": 5}), "a") == 5.0

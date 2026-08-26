@@ -36,8 +36,7 @@ import pandas as pd
 from src.common.config import Config, load_config
 from src.research import attribution, significance
 from src.research.backtester import Backtester
-
-_PF_CLAMP = 999.0
+from src.research.scoreboard import PF_CLAMP
 
 
 @dataclass
@@ -67,7 +66,7 @@ class WalkForwardReport:
         lines.append(header)
         lines.append("-" * 78)
         for f in self.folds:
-            pf = "inf" if f.profit_factor >= _PF_CLAMP else f"{f.profit_factor:.2f}"
+            pf = "inf" if f.profit_factor >= PF_CLAMP else f"{f.profit_factor:.2f}"
             window = f"{f.start}..{f.end}"
             lines.append(
                 f"{f.fold:<6}{window:<24}{f.strategy:<16}{f.num_trades:>7}"
@@ -133,7 +132,7 @@ def evaluate_walk_forward(
                 strategy=name,
                 num_trades=stats["num_trades"],
                 win_rate=stats["win_rate"],
-                profit_factor=_PF_CLAMP if pf == float("inf") else pf,
+                profit_factor=PF_CLAMP if pf == float("inf") else pf,
                 mean_return_pct=round(sum(rets) / len(rets), 5) if rets else 0.0,
                 bootstrap_p_value=boot["p_value"],
             ))

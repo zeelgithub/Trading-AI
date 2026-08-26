@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Protocol, runtime_checkable
 
+from src.common.errors import retry_transient
 from src.common.secrets import MarketDataCredentials, load_market_data_credentials
 
 
@@ -56,7 +57,10 @@ class AlpacaNews:
         start = end - timedelta(days=days)
         req = NewsRequest(symbols=symbol, start=start, end=end, limit=limit,
                           include_content=False)
-        resp = self._get_client().get_news(req)
+        # Read-only: retry a transient network blip instead of letting one
+        # dropped connection fail the whole symbol's headline fetch -- same
+        # pattern as alpaca_data.py's bar fetch.
+        resp = retry_transient(lambda: self._get_client().get_news(req))
         items = getattr(resp, "news", None) or getattr(resp, "data", {}).get("news", [])
         out: list[Headline] = []
         for it in items:

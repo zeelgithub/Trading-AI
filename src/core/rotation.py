@@ -27,12 +27,13 @@ Boundary: places orders NO, holds trading credentials NO.
 from __future__ import annotations
 
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from src.common.jsonio import atomic_write_json, load_json_or_quarantine
 from src.common.logging import get_logger
+from src.common.record_store import DEFAULT_RECOMMENDATION_EXPIRY_MINUTES, JsonRecordStore
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_STATE_PATH = PROJECT_ROOT / "state" / "rotation.json"
@@ -106,7 +107,8 @@ class RotationProposal:
     expiry_ts: str = ""
 
     @classmethod
-    def create(cls, action, strategy, weight=None, rationale="", expiry_minutes=10080):
+    def create(cls, action, strategy, weight=None, rationale="",
+              expiry_minutes=DEFAULT_RECOMMENDATION_EXPIRY_MINUTES):
         now = _utcnow()
         return cls(
             id=f"rot-{strategy}-{now.strftime('%Y%m%d')}-{uuid.uuid4().hex[:6]}",
@@ -129,40 +131,9 @@ class RotationProposal:
         return f"{head}" + (f"  ({self.rationale})" if self.rationale else "")
 
 
-class RotationProposalStore:
+class RotationProposalStore(JsonRecordStore[RotationProposal]):
     def __init__(self, path: str | Path = DEFAULT_PROPOSALS_PATH) -> None:
-        self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-
-    def _load_raw(self) -> dict[str, dict]:
-        payload, quarantined = load_json_or_quarantine(self.path)
-        if quarantined is not None:
-            get_logger("rotation").error(
-                "rotation proposals corrupt; moved to %s and starting empty", quarantined)
-            return {}
-        return payload or {}
-
-    def _save_raw(self, payload: dict[str, dict]) -> None:
-        atomic_write_json(self.path, payload)
-
-    def add(self, proposal: RotationProposal) -> None:
-        payload = self._load_raw()
-        payload[proposal.id] = asdict(proposal)
-        self._save_raw(payload)
-
-    def get(self, proposal_id: str) -> RotationProposal | None:
-        raw = self._load_raw().get(proposal_id)
-        return RotationProposal(**raw) if raw else None
-
-    def list_pending(self) -> list[RotationProposal]:
-        out = [RotationProposal(**d) for d in self._load_raw().values()]
-        return [p for p in out if p.status == "pending" and not p.is_expired()]
-
-    def mark(self, proposal_id: str, status: str) -> None:
-        payload = self._load_raw()
-        if proposal_id in payload:
-            payload[proposal_id]["status"] = status
-            self._save_raw(payload)
+        super().__init__(path, RotationProposal, log_name="rotation")
 
 
 # --- service (validate -> propose -> approve/deny) ---------------------------
@@ -178,7 +149,7 @@ class RotationService:
         state_store: RotationStateStore | None = None,
         proposal_store: RotationProposalStore | None = None,
         max_weight: float = 1.0,
-        expiry_minutes: int = 10080,
+        expiry_minutes: int = DEFAULT_RECOMMENDATION_EXPIRY_MINUTES,
         strategy_defaults: dict[str, bool] | None = None,
     ) -> None:
         self.known = tuple(known_strategies)
@@ -225,6 +196,8 @@ class RotationService:
         p = self.proposal_store.get(proposal_id)
         if p is None:
             return {"ok": False, "error": "proposal not found"}
+        if p.status != "pending":
+            return {"ok": False, "error": f"already {p.status}"}
         self.proposal_store.mark(proposal_id, "denied")
         return {"ok": True, "summary": f"denied: {p.summary()}"}
 

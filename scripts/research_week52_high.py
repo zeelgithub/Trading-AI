@@ -40,13 +40,12 @@ from src.data import store
 from src.data.features import build_features
 from src.research import attribution, significance
 from src.research.backtester import Backtester
-from src.research.scoreboard import classify
+from src.research.scoreboard import PF_CLAMP, classify
 from src.research.walkforward import evaluate_walk_forward
 from src.strategy.registry import REGISTRY
 from src.strategy.week52_high import Week52High
 
 log = get_logger("research_week52_high")
-_PF_CLAMP = 999.0
 
 
 def _build_features(symbols: list[str], lookback_days: int, offline: bool) -> dict[str, pd.DataFrame]:
@@ -153,7 +152,7 @@ def main() -> None:
     print("WEEK52_HIGH -- IN-SAMPLE RESULT")
     print("=" * 78)
     print(f"{'trades':<10}{'win%':<10}{'PF':<10}{'sharpe':<10}{'p-value':<10}{'PSR':<10}{'consist':<10}verdict")
-    pf_disp = "inf" if pf == float("inf") or pf >= _PF_CLAMP else f"{pf:.2f}"
+    pf_disp = "inf" if pf == float("inf") or pf >= PF_CLAMP else f"{pf:.2f}"
     cons_disp = "n/a" if cons is None else f"{cons:.2f}"
     print(f"{stats['num_trades']:<10}{stats['win_rate']*100:<10.1f}{pf_disp:<10}"
           f"{significance.trade_sharpe(rets):<10.2f}{boot['p_value']:<10.3f}{psr:<10.2f}"

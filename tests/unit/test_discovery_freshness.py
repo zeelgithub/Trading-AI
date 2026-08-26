@@ -36,7 +36,7 @@ def test_enabled_list_within_threshold_is_not_flagged():
     assert stale_universe_lists(config, today=date(2026, 8, 25)) == []
 
 
-def test_enabled_list_past_threshold_is_flagged():
+def test_enabled_list_past_threshold_is_flagged_and_others_are_not():
     config = _config(sp500=True, sp400=False, sp600=False, smallcap=False, volatile=False,
                      max_staleness_days=45)
     stale = stale_universe_lists(config, today=date(2027, 1, 1))
@@ -44,13 +44,6 @@ def test_enabled_list_past_threshold_is_flagged():
     flag, age, max_age = stale[0]
     assert flag == "sp500"
     assert age > max_age == 45
-
-
-def test_only_enabled_lists_are_checked():
-    config = _config(sp500=True, sp400=False, sp600=False, smallcap=False, volatile=False,
-                     max_staleness_days=45)
-    stale = stale_universe_lists(config, today=date(2030, 1, 1))
-    assert [flag for flag, _, _ in stale] == ["sp500"]
 
 
 def test_staleness_detail_mentions_build_script_for_generated_lists():

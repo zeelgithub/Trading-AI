@@ -118,6 +118,18 @@ def exit_side(position_side: Side) -> Side:
     return Side.SHORT if position_side == Side.LONG else Side.LONG
 
 
+def is_stop_order(order_type: str) -> bool:
+    """True for any stop-family order type Alpaca returns (`stop`,
+    `stop_limit`, `trailing_stop`, ...) -- a substring match, not an exact
+    set, since Alpaca's own OrderType enum values are all `*stop*`. The one
+    place this classification is defined: it's what
+    src/execution/reconciler.py's naked-position detector (rule 4) and
+    OrderManager's OCO-leg identification both need to agree on, so a
+    change here can't leave the two silently out of sync the way two
+    independent `"stop" in o.type` copies could."""
+    return "stop" in order_type
+
+
 class AlpacaBroker:
     """Concrete BrokerInterface backed by alpaca-py's TradingClient.
 

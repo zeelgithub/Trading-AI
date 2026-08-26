@@ -73,11 +73,11 @@ class RiskManager:
         """config/symbols.yaml per-symbol overrides.max_position_pct wins over
         the global default (risk_limits.yaml position.max_position_pct) --
         purely additive: a symbol with no override behaves exactly as before."""
-        for entry in self.config.symbols.get("watchlist", []) or []:
-            if entry.get("symbol") == symbol:
-                override = entry.get("overrides", {}).get("max_position_pct")
-                return float(override) if override is not None else default
-        return default
+        entry = self.config.watchlist_entry(symbol)
+        if entry is None:
+            return default
+        override = entry.get("overrides", {}).get("max_position_pct")
+        return float(override) if override is not None else default
 
     def _initial_stop(self, intent: Intent, entry: float) -> float | None:
         if intent.stop_loss is not None:

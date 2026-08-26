@@ -63,9 +63,8 @@ def main() -> None:
     # when set -- 3 live-watchlist symbols produce too few trades to tell a real
     # edge from noise against the pipeline's own min_trades bar. Falls back to
     # the watchlist if the research universe isn't configured.
-    default_symbols = list(config.get("settings.research.backtest_universe", None)
-                           or config.enabled_symbols())
-    default_lookback = int(config.get("settings.data.lookback_days", 400))
+    default_symbols = config.research_universe()
+    default_lookback = config.data_lookback_days()
 
     parser = argparse.ArgumentParser(description="Evaluate strategies: signal vs. noise.")
     parser.add_argument("--symbols", nargs="+", default=None,

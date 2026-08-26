@@ -29,6 +29,52 @@ def test_strong_performer_lands_in_top_bucket():
     assert last["momentum_percentile"] > 0.5
 
 
+def test_weak_performer_lands_in_bottom_bucket():
+    n = 200
+    # AAA craters steadily; BBB, CCC, DDD, EEE stay flat -- AAA should
+    # dominate the bottom bucket (the symmetric "loser" side of top_pct).
+    weak = [100.0 * (1 - 0.01) ** i for i in range(n)]
+    flat = [100.0] * n
+    feats = add_cross_sectional_momentum(
+        {"AAA": _series(weak), "BBB": _series(flat), "CCC": _series(flat),
+         "DDD": _series(flat), "EEE": _series(flat)},
+        lookback=60, skip=5, top_pct=0.2,
+    )
+    last = feats["AAA"].iloc[-1]
+    assert last["momentum_bottom_bucket"]
+    assert not last["momentum_top_bucket"]
+    assert last["momentum_percentile"] < 0.5
+
+
+def test_bottom_bucket_follows_a_non_default_top_pct():
+    """Regression guard for the bug this column was added to fix:
+    src/strategy/momentum.py used to hardcode 0.2 for the bottom-bucket
+    cutoff independent of top_pct -- so a caller varying top_pct (e.g.
+    scripts/research_momentum.py --top-pct) got a long side that correctly
+    followed the new cutoff and a short side that silently didn't.
+    momentum_bottom_bucket must be computed from the SAME top_pct passed
+    in here, not a fixed 0.2, so a strategy reading this column can't drift
+    from it."""
+    n = 200
+    weak = [100.0 * (1 - 0.01) ** i for i in range(n)]
+    flat = [100.0] * n
+    frames = {"AAA": _series(weak), "BBB": _series(flat), "CCC": _series(flat),
+             "DDD": _series(flat), "EEE": _series(flat), "FFF": _series(flat)}
+
+    narrow = add_cross_sectional_momentum(dict(frames), lookback=60, skip=5, top_pct=0.1)
+    wide = add_cross_sectional_momentum(dict(frames), lookback=60, skip=5, top_pct=0.5)
+
+    # AAA is the single worst performer either way, so it's in the bottom
+    # bucket under both -- but a flat symbol (BBB) is only swept into the
+    # bottom half under the wide (top_pct=0.5, i.e. "bottom 50%") cutoff,
+    # never under the narrow one (top_pct=0.1, i.e. "bottom 10%" -- only
+    # room for the single worst performer).
+    assert narrow["AAA"].iloc[-1]["momentum_bottom_bucket"]
+    assert wide["AAA"].iloc[-1]["momentum_bottom_bucket"]
+    assert not narrow["BBB"].iloc[-1]["momentum_bottom_bucket"]
+    assert wide["BBB"].iloc[-1]["momentum_bottom_bucket"]
+
+
 def test_flat_performer_not_in_top_bucket_when_a_strong_one_exists():
     n = 200
     strong = [100.0 * (1 + 0.01) ** i for i in range(n)]

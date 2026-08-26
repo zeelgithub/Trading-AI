@@ -36,7 +36,7 @@ from src.strategy.base import (
     has_nan,
 )
 
-_REQUIRED = ["momentum_top_bucket", "momentum_percentile"]
+_REQUIRED = ["momentum_top_bucket", "momentum_bottom_bucket", "momentum_percentile"]
 
 
 class Momentum(Strategy):
@@ -46,7 +46,7 @@ class Momentum(Strategy):
         if len(features) < 2 or has_nan(features.iloc[-1], ["close"]):
             return None
         last, prev = features.iloc[-1], features.iloc[-2]
-        if pd.isna(last.get("momentum_top_bucket")) or pd.isna(prev.get("momentum_top_bucket")):
+        if has_nan(last, _REQUIRED) or has_nan(prev, _REQUIRED):
             return None
         close = last.close
 
@@ -54,13 +54,15 @@ class Momentum(Strategy):
         if entered_top and bullish_confirmation(last, prev, self.confirmation_min_body_ratio):
             return self._intent(symbol, Side.LONG, close, last.momentum_percentile)
 
-        # Bottom-bucket entry (percentile <= (1 - top_pct), i.e. also "extreme"
-        # from the other end) -- symmetric short leg, matches the academic
-        # "buy winners, sell losers" definition. shorts_allowed() gates it the
-        # same way every other strategy's short leg is gated.
+        # Bottom-bucket entry -- symmetric short leg, matches the academic
+        # "buy winners, sell losers" definition. momentum_bottom_bucket is
+        # precomputed by add_cross_sectional_momentum from the SAME top_pct
+        # used for the long side (not an independently hardcoded cutoff --
+        # see that function's docstring for why that used to be a real bug).
+        # shorts_allowed() gates it the same way every other strategy's short
+        # leg is gated.
         entered_bottom = (
-            last.momentum_percentile <= 0.2 and prev.momentum_percentile > 0.2
-            and not bool(last.momentum_top_bucket)
+            bool(last.momentum_bottom_bucket) and not bool(prev.momentum_bottom_bucket)
         )
         if (entered_bottom
                 and bearish_confirmation(last, prev, self.confirmation_min_body_ratio)
@@ -71,11 +73,11 @@ class Momentum(Strategy):
 
     def should_exit(self, symbol: str, features: pd.DataFrame, side: Side) -> str | None:
         last = features.iloc[-1]
-        if has_nan(last, ["momentum_top_bucket"]):
+        if has_nan(last, _REQUIRED):
             return None
         if side == Side.LONG and not bool(last.momentum_top_bucket):
             return "left_momentum_top_bucket"
-        if side == Side.SHORT and last.momentum_percentile > 0.2:
+        if side == Side.SHORT and not bool(last.momentum_bottom_bucket):
             return "left_momentum_bottom_bucket"
         return None
 

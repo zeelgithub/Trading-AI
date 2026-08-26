@@ -23,9 +23,7 @@ import pandas as pd
 from src.common.config import Config, load_config
 from src.research import attribution, significance
 from src.research.backtester import Backtester
-from src.research.scoreboard import VERDICT_RANK, StrategyScore, classify
-
-_PF_CLAMP = 999.0
+from src.research.scoreboard import PF_CLAMP, VERDICT_RANK, StrategyScore, classify
 
 
 @dataclass
@@ -44,7 +42,7 @@ class EvaluationReport:
         lines.append("-" * 78)
         for s in self.scores:
             cons = "n/a" if s.consistency is None else f"{s.consistency:.2f}"
-            pf = "inf" if s.profit_factor >= _PF_CLAMP else f"{s.profit_factor:.2f}"
+            pf = "inf" if s.profit_factor >= PF_CLAMP else f"{s.profit_factor:.2f}"
             lines.append(
                 f"{s.strategy:<16}{s.num_trades:>7}{s.win_rate*100:>6.1f}{pf:>7}"
                 f"{s.sharpe:>8.2f}{s.p_value_adjusted:>8.3f}{s.psr:>7.2f}{cons:>9}"
@@ -104,7 +102,7 @@ def evaluate_strategies(
             strategy=name,
             num_trades=stats["num_trades"],
             win_rate=stats["win_rate"],
-            profit_factor=_PF_CLAMP if pf == float("inf") else pf,
+            profit_factor=PF_CLAMP if pf == float("inf") else pf,
             total_pnl=stats["total_pnl"],
             sharpe=significance.trade_sharpe(rets),
             bootstrap_p_value=boot["p_value"],

@@ -135,7 +135,11 @@ class Listener:
             name: self.config.get(f"strategies.strategies.{name}.enabled", True)
             for name in strategy_names
         }
-        self.rotation = RotationService(strategy_names, strategy_defaults=strategy_defaults)
+        self.rotation = RotationService(
+            strategy_names, strategy_defaults=strategy_defaults,
+            max_weight=float(self.config.get("settings.approval.rotation_max_weight", 1.0)),
+            expiry_minutes=int(self.config.get("settings.approval.recommendation_expiry_minutes", 10080)),
+        )
         # Discovery source reweighting: same propose-then-approve shape as
         # rotation above, but the suggestion is computed from the ledger
         # (src/discovery/weight_advisor.py) instead of an analyst. Reuses
@@ -145,6 +149,7 @@ class Listener:
         self.weight_advisor = DiscoveryWeightService(
             active_sources=_scorer_defaults.active_sources,
             default_weights=_scorer_defaults.weights,
+            expiry_minutes=int(self.config.get("settings.approval.recommendation_expiry_minutes", 10080)),
         )
 
     # --- top-level message routing ---
@@ -325,8 +330,13 @@ class Listener:
             r"\b(buy|purchase|get|pick up|long)\b", t
         )
         if buy_m:
-            # extract quantity — first integer in the text
-            qty_m = re.search(r"\b(\d+)\b", t)
+            # extract quantity — first integer NOT immediately followed by
+            # "%" (a percentage is always the stop-loss in this grammar,
+            # never the quantity). Without the lookahead, "buy tesla with a
+            # 15% stop" (no quantity given at all) matched "15" as BOTH the
+            # qty and the stop -- a plausible-looking but fabricated share
+            # count from a number that was never the quantity.
+            qty_m = re.search(r"\b(\d+)\b(?!\s*%)", t)
             qty = int(qty_m.group(1)) if qty_m else 0
 
             # extract stop-loss % — "8%", "8 percent", "--stop 8", "with 8% stop"

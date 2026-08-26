@@ -15,11 +15,13 @@ Boundary: read/write JSON state; places orders NO.
 
 from __future__ import annotations
 
-import json
 import math
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+
+from src.common.jsonio import atomic_write_json, load_json_or_quarantine
+from src.common.logging import get_logger
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_PATH = PROJECT_ROOT / "state" / "scoreboard.json"
@@ -27,8 +29,11 @@ DEFAULT_PATH = PROJECT_ROOT / "state" / "scoreboard.json"
 VERDICTS = ("validated", "promising", "inconclusive", "noise")
 VERDICT_RANK = {"validated": 3, "promising": 2, "inconclusive": 1, "noise": 0}
 
-# JSON has no infinity; profit_factor of a loss-free strategy is clamped to this.
-_PF_CLAMP = 999.0
+# JSON has no infinity; profit_factor of a loss-free strategy is clamped to
+# this. Public (not _-prefixed): evaluation.py and walkforward.py both need
+# the SAME clamp value to agree with what this module persists, previously
+# two independent copies of this literal.
+PF_CLAMP = 999.0
 
 
 @dataclass
@@ -79,14 +84,16 @@ class Scoreboard:
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def load(self) -> dict[str, StrategyScore]:
-        if not self.path.exists():
+        raw, quarantined = load_json_or_quarantine(self.path)
+        if quarantined is not None:
+            get_logger("scoreboard").error(
+                "scoreboard file corrupt; moved to %s -- reverting to empty", quarantined)
             return {}
-        raw = json.loads(self.path.read_text(encoding="utf-8"))
-        return {k: StrategyScore(**v) for k, v in raw.items()}
+        return {k: StrategyScore(**v) for k, v in (raw or {}).items()}
 
     def save(self, scores: dict[str, StrategyScore]) -> None:
         payload = {k: _sanitize(asdict(v)) for k, v in scores.items()}
-        self.path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        atomic_write_json(self.path, payload)
 
     def upsert(self, score: StrategyScore) -> None:
         scores = self.load()
@@ -124,7 +131,7 @@ def _sanitize(d: dict) -> dict:
     out = {}
     for k, v in d.items():
         if isinstance(v, float) and not math.isfinite(v):
-            out[k] = _PF_CLAMP if v > 0 else 0.0
+            out[k] = PF_CLAMP if v > 0 else 0.0
         else:
             out[k] = v
     return out

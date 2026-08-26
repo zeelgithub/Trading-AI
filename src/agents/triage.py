@@ -14,8 +14,8 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from src.agents.catalog import ANOMALY_TRIAGE
-from src.agents.dispatch import AgentRequest, Dispatcher
-from src.agents.model import AnthropicModel, ModelClient
+from src.agents.dispatch import AgentRequest, Dispatcher, build_dispatcher
+from src.agents.model import ModelClient
 from src.agents.runtime import AgentResult
 from src.agents.tools.reads import build_read_registry
 
@@ -37,12 +37,11 @@ class AnomalyTriage:
 
     def _dispatch(self) -> Dispatcher:
         if self._dispatcher is None:
-            factory = self._model_factory or (lambda model_id: AnthropicModel(model_id))
-            self._dispatcher = Dispatcher(
+            self._dispatcher = build_dispatcher(
                 profiles={"anomaly_triage": ANOMALY_TRIAGE},
                 registry=build_read_registry(),
-                model_factory=factory,
                 routes={"anomaly": "anomaly_triage"},
+                model_factory=self._model_factory,
                 audit=self.audit,
             )
         return self._dispatcher

@@ -53,6 +53,18 @@ def test_rsi_bounds_and_extremes():
     assert r_dn.iloc[-1] == pytest.approx(0.0)  # only losses
 
 
+def test_rsi_frozen_series_is_nan_not_100():
+    """Regression guard: a fully frozen/stalled series (zero price movement
+    at all -- avg_gain AND avg_loss both 0, not just avg_loss) used to be
+    forced to RSI 100 ("extremely overbought") via the same avg_loss==0
+    branch that correctly handles a genuine only-gains run. RSI is
+    undefined for zero movement, not 100 -- left as NaN so has_nan() guards
+    catch a stalled feed instead of trading on it."""
+    frozen = pd.Series([100.0] * 30)
+    out = ind.rsi(frozen)
+    assert pd.isna(out.iloc[-1])
+
+
 def test_atr_non_negative(ohlc):
     a = ind.atr(ohlc["high"], ohlc["low"], ohlc["close"]).dropna()
     assert (a >= 0).all()

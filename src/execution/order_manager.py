@@ -21,7 +21,7 @@ from enum import Enum
 
 from src.common.errors import retry_transient
 from src.common.models import Decision, RiskDecision, Side
-from src.execution.broker_alpaca import BrokerInterface
+from src.execution.broker_alpaca import BrokerInterface, is_stop_order
 
 
 class PositionStatus(str, Enum):
@@ -73,7 +73,7 @@ def is_dead_entry(position: ManagedPosition) -> bool:
             and position.last_order_status in DEAD_ORDER_STATUSES)
 
 
-def _coid(symbol: str, strategy: str, tag: str, kind: str) -> str:
+def coid(symbol: str, strategy: str, tag: str, kind: str) -> str:
     """Deterministic client_order_id so identical retries are idempotent."""
     return f"{symbol}-{strategy}-{tag}-{kind}"
 
@@ -108,14 +108,14 @@ class OrderManager:
 
         # Deliberately NOT wrapped in retry_transient: if the request reached
         # the broker but the response was lost to the network blip, a blind
-        # retry could submit a second entry. `_coid` makes retries idempotent
+        # retry could submit a second entry. `coid` makes retries idempotent
         # at the broker (duplicate client_order_id is rejected, not
         # duplicated), but that rejection isn't a transient status either, so
         # it would still surface as an error here -- default-to-halt (rule 3)
         # and a human/reconciler confirming what actually happened at the
         # broker is safer than guessing.
         entry = self.broker.submit_market_entry(
-            symbol, qty, side, _coid(symbol, intent.strategy, tag, "entry"),
+            symbol, qty, side, coid(symbol, intent.strategy, tag, "entry"),
         )
 
         return ManagedPosition(
@@ -160,6 +160,28 @@ class OrderManager:
             position.status = PositionStatus.CLOSED
         return position.status
 
+    def recheck_partial_fill(self, position: ManagedPosition) -> None:
+        """settle() attaches protection sized for whatever's filled the FIRST
+        time it observes a fill, and marks the position OPEN immediately --
+        deliberate (see settle()'s docstring, "act on filled, not ordered").
+        But once OPEN, nothing re-queries the entry order again (the caller
+        only re-settles PENDING_ENTRY positions), so if that order keeps
+        filling afterward, the resting stop silently stops covering the real
+        position size. Call this once per cycle for any OPEN position where
+        filled_qty < qty (a known partial fill) to catch that: if more has
+        filled since protection was attached, that's shares protected by
+        nothing. Resizing a LIVE stop's quantity isn't something this
+        execution layer supports, so growth raises (rule 3: halt rather than
+        silently drift) instead of attempting one."""
+        order = retry_transient(lambda: self.broker.get_order(position.entry_order_id))
+        if order.filled_qty > position.filled_qty:
+            raise RuntimeError(
+                f"{position.symbol}: entry filled further ({position.filled_qty:g} -> "
+                f"{order.filled_qty:g}) after protection was already attached for the "
+                f"smaller amount -- manual reconciliation needed"
+            )
+        position.last_order_status = order.status
+
     def _attach_protection(self, position: ManagedPosition) -> None:
         """Submit the standalone protective stop (or GTC OCO with a
         take-profit) now that the entry is confirmed filled. `retry_transient`
@@ -173,14 +195,14 @@ class OrderManager:
             parent = retry_transient(lambda: self.broker.submit_oco_exit(
                 position.symbol, position.filled_qty, position.side,
                 position.current_stop, take_profit,
-                _coid(position.symbol, position.strategy, tag, "protect"),
+                coid(position.symbol, position.strategy, tag, "protect"),
             ))
             stop_id, tp_id = self._leg_ids(parent)
         else:
             stop_order = retry_transient(lambda: self.broker.submit_stop(
                 position.symbol, position.filled_qty, position.side,
                 position.current_stop,
-                _coid(position.symbol, position.strategy, tag, "protect"),
+                coid(position.symbol, position.strategy, tag, "protect"),
             ))
             stop_id, tp_id = stop_order.id, None
 
@@ -255,7 +277,7 @@ class OrderManager:
     def _leg_ids(parent) -> tuple[str | None, str | None]:
         stop_id = tp_id = None
         for leg in parent.legs:
-            if "stop" in leg.type:
+            if is_stop_order(leg.type):
                 stop_id = leg.id
             elif leg.type in ("limit", "take_profit"):
                 tp_id = leg.id

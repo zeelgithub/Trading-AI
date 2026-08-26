@@ -31,3 +31,28 @@ def test_status_and_control_words():
     assert _parse("show my positions") == {"cmd": "status"}
     assert _parse("halt the bot") == {"cmd": "halt"}
     assert _parse("run a cycle now") == {"cmd": "run"}
+
+
+def test_buy_with_explicit_qty_and_stop():
+    assert _parse("buy 10 TSLA with 8% stop") == {
+        "cmd": "buy", "sym": "TSLA", "qty": 10, "stop": 8.0,
+    }
+
+
+def test_buy_without_qty_asks_for_it_instead_of_fabricating_one():
+    """Regression guard: qty extraction used to grab the FIRST integer
+    anywhere in the message, before the stop-loss phrase was identified --
+    "buy tesla with a 15% stop" (no quantity ever given) matched "15" as
+    BOTH qty and stop, silently producing a plausible-looking but fabricated
+    "buy 15 TSLA" instead of asking for the missing quantity."""
+    assert _parse("buy tesla with a 15% stop") == {
+        "cmd": "unknown", "reply": 'How many shares? Try: "buy 10 TSLA".',
+    }
+
+
+def test_buy_qty_before_stop_percent_still_parses_correctly():
+    """The percent-lookahead fix must not break the normal case where a real
+    quantity legitimately appears before the stop percentage."""
+    assert _parse("buy 15 TSLA with 8% stop") == {
+        "cmd": "buy", "sym": "TSLA", "qty": 15, "stop": 8.0,
+    }

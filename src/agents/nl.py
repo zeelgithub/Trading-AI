@@ -18,8 +18,8 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from src.agents.catalog import NL_ROUTER
-from src.agents.dispatch import AgentRequest, Dispatcher
-from src.agents.model import AnthropicModel, ModelClient
+from src.agents.dispatch import AgentRequest, Dispatcher, build_dispatcher
+from src.agents.model import ModelClient
 from src.agents.tools.base import ToolRegistry
 from src.common.logging import get_logger
 
@@ -29,6 +29,11 @@ FallbackFn = Callable[[str], dict | None]
 ModelFactory = Callable[[str], ModelClient]
 
 _KNOWN = {"status", "pending", "buy", "close", "flatten", "halt", "reset", "run", "help", "unknown"}
+
+# Fallback stop-loss percent for a parsed /buy when the model omits `stop`.
+# Same "no stop given" convention as trade_service.place_manual's own
+# stop_pct default -- collapsed here from two independent 10.0 literals.
+_DEFAULT_STOP_PCT = 10.0
 
 
 class NLCommandParser:
@@ -40,10 +45,12 @@ class NLCommandParser:
         fallback: FallbackFn | None = None,
         model_factory: ModelFactory | None = None,
         available: bool | None = None,
+        audit=None,
     ) -> None:
         self.fallback = fallback
         self._model_factory = model_factory
         self._available = available
+        self.audit = audit
         self._dispatcher: Dispatcher | None = None
 
     def available(self) -> bool:
@@ -74,12 +81,12 @@ class NLCommandParser:
 
     def _dispatch(self) -> Dispatcher:
         if self._dispatcher is None:
-            factory = self._model_factory or (lambda model_id: AnthropicModel(model_id))
-            self._dispatcher = Dispatcher(
+            self._dispatcher = build_dispatcher(
                 profiles={"nl_router": NL_ROUTER},
                 registry=ToolRegistry(),
-                model_factory=factory,
                 routes={"nl_command": "nl_router"},
+                model_factory=self._model_factory,
+                audit=self.audit,
             )
         return self._dispatcher
 
@@ -100,9 +107,9 @@ def _normalize(out: dict) -> dict:
         except (TypeError, ValueError):
             result["qty"] = 0
         try:
-            result["stop"] = float(out["stop"]) if out.get("stop") is not None else 10.0
+            result["stop"] = float(out["stop"]) if out.get("stop") is not None else _DEFAULT_STOP_PCT
         except (TypeError, ValueError):
-            result["stop"] = 10.0
+            result["stop"] = _DEFAULT_STOP_PCT
         return result
     if cmd == "close":
         return {"cmd": "close", "sym": str(out.get("sym") or "").strip().upper()}

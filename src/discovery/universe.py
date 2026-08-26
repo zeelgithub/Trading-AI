@@ -150,7 +150,7 @@ def cached_feature_provider(config: Config, universe: list[str] | None = None):
     from src.data.ingest import batch_ingest_universe, drop_incomplete_bar, ingest_symbol
 
     conn = store.connect()
-    lookback = int(config.get("settings.data.lookback_days", 400))
+    lookback = config.data_lookback_days()
     already_handled: set[str] = set()
     if universe:
         reports = batch_ingest_universe(conn, universe, lookback_days=lookback)

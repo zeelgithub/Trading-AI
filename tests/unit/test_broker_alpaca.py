@@ -24,7 +24,7 @@ from dataclasses import replace as dc_replace
 from src.common.config import load_config
 from src.common.models import Side
 from src.common.secrets import TradingCredentials
-from src.execution.broker_alpaca import AlpacaBroker, build_broker
+from src.execution.broker_alpaca import AlpacaBroker, build_broker, is_stop_order
 
 
 def _creds() -> TradingCredentials:
@@ -196,6 +196,19 @@ def test_submit_oco_exit_is_gtc_oco_with_both_legs() -> None:
     assert req.stop_loss.stop_price == 90.0
     assert req.take_profit.limit_price == 110.0
     assert len(order.legs) == 2
+
+
+# --- is_stop_order: the one definition reconciler.py's naked-position
+# detector and OrderManager's OCO-leg classification both rely on ---
+
+def test_is_stop_order_true_for_stop_family_types():
+    for t in ("stop", "stop_limit", "trailing_stop"):
+        assert is_stop_order(t) is True
+
+
+def test_is_stop_order_false_for_non_stop_types():
+    for t in ("limit", "market", "take_profit"):
+        assert is_stop_order(t) is False
 
 
 # --- build_broker: the one place that decides paper vs. live ---

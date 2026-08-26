@@ -224,7 +224,7 @@ def live_feature_provider(config, conn: sqlite3.Connection | None = None):
     from src.data.features import build_features
 
     conn = conn or store.connect()
-    lookback = int(config.get("settings.data.lookback_days", 400))
+    lookback = config.data_lookback_days()
 
     def provider(symbol: str) -> pd.DataFrame:
         ingest_symbol(conn, symbol, lookback_days=lookback)

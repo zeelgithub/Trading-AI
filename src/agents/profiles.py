@@ -19,6 +19,11 @@ from dataclasses import dataclass
 # Default tier: the cheap, fast model. Heavier reasoning profiles override this.
 DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 
+# Strong tier: heavier-reasoning profiles (strategy_analyst, anomaly_triage).
+# Was two independent raw-string literals in catalog.py; named here so a
+# future model rotation is one edit, not a grep-and-hope.
+STRONG_MODEL = "claude-sonnet-4-6"
+
 
 @dataclass(frozen=True)
 class AgentProfile:

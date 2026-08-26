@@ -130,6 +130,7 @@ def _momentum_bucket_transition_frame() -> pd.DataFrame:
     df = make_features(rows)
     df.index = pd.bdate_range(start="2024-01-02", periods=len(df))
     df["momentum_top_bucket"] = [False, False, True, True, True]
+    df["momentum_bottom_bucket"] = [False, False, False, False, False]
     df["momentum_percentile"] = [0.5, 0.5, 0.95, 0.95, 0.95]
     return df
 

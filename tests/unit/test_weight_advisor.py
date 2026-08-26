@@ -106,13 +106,14 @@ def test_state_roundtrip(tmp_path):
 
 # --- DiscoveryWeightService ---
 
-def _service(tmp_path, ledger: DiscoveryLedger | None = None) -> DiscoveryWeightService:
+def _service(tmp_path, ledger: DiscoveryLedger | None = None, **kw) -> DiscoveryWeightService:
     return DiscoveryWeightService(
         active_sources={"congress", "technical", "news", "fundamentals"},
         default_weights={"congress": 0.35, "technical": 0.35, "news": 0.15, "fundamentals": 0.15},
         ledger=ledger or DiscoveryLedger(path=tmp_path / "ledger.jsonl"),
         state_store=DiscoveryWeightStateStore(tmp_path / "w.json"),
         proposal_store=WeightProposalStore(tmp_path / "wp.json"),
+        **kw,
     )
 
 
@@ -191,6 +192,31 @@ def test_deny_leaves_state_unchanged(tmp_path):
     assert svc.list_pending() == []
 
 
+def test_deny_rejects_an_already_approved_proposal(tmp_path):
+    """Regression guard: deny() used to have no status guard at all (unlike
+    approve(), and unlike the trade-proposal deny path in run_telegram.py's
+    _on_deny) -- a stale Telegram button tap could flip an already-approved
+    (and applied) proposal's audit record to "denied" after the fact,
+    corrupting the record without actually reverting the applied weights."""
+    ledger = DiscoveryLedger(path=tmp_path / "ledger.jsonl")
+    for i in range(30):
+        ledger.record_surface([_cand(f"C{i}", 90, ["congress"])],
+                              [SimpleNamespace(symbol=f"C{i}", id=f"p{i}")] if i < 28 else [])
+    for i in range(30):
+        ledger.record_surface([_cand(f"T{i}", 30, ["technical"])],
+                              [SimpleNamespace(symbol=f"T{i}", id=f"q{i}")] if i < 2 else [])
+    svc = _service(tmp_path, ledger=ledger)
+    pid = svc.suggest()["proposal_id"]
+    assert svc.approve(pid)["ok"]
+    applied_weights = svc.state_store.load().weights
+
+    result = svc.deny(pid)
+
+    assert result["ok"] is False
+    assert svc.proposal_store.get(pid).status == "approved"
+    assert svc.state_store.load().weights == applied_weights  # untouched
+
+
 def test_approve_rejects_degenerate_weights(tmp_path):
     from src.discovery.weight_advisor import WeightProposal
 
@@ -206,3 +232,33 @@ def test_approve_rejects_degenerate_weights(tmp_path):
 
 def test_approve_unknown_proposal_id(tmp_path):
     assert _service(tmp_path).approve("does-not-exist")["ok"] is False
+
+
+def test_custom_expiry_minutes_is_actually_used(tmp_path):
+    """expiry_minutes (config-driven in production, see scripts/run_telegram.py's
+    settings.approval.recommendation_expiry_minutes) must reach the proposal
+    created by suggest(), not just sit unused on the service."""
+    from datetime import datetime, timedelta, timezone
+
+    ledger = DiscoveryLedger(path=tmp_path / "ledger.jsonl")
+    for i in range(30):
+        proposed = i < 27  # congress: strong hit rate
+        ledger.record_surface(
+            [_cand(f"C{i}", 90, ["congress"])],
+            [SimpleNamespace(symbol=f"C{i}", id=f"p{i}")] if proposed else [],
+        )
+    for i in range(30):
+        proposed = i < 3  # technical: weak hit rate
+        ledger.record_surface(
+            [_cand(f"T{i}", 30, ["technical"])],
+            [SimpleNamespace(symbol=f"T{i}", id=f"q{i}")] if proposed else [],
+        )
+    svc = _service(tmp_path, ledger=ledger, expiry_minutes=5)
+
+    result = svc.suggest()
+
+    assert result["ok"] is True
+    prop = svc.proposal_store.get(result["proposal_id"])
+    now = datetime.now(timezone.utc)
+    assert not prop.is_expired(now + timedelta(minutes=4))
+    assert prop.is_expired(now + timedelta(minutes=6))

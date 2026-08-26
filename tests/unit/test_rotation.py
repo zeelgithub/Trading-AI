@@ -132,3 +132,40 @@ def test_deny_leaves_state_unchanged(tmp_path):
     assert svc.deny(pid)["ok"]
     assert svc.list_pending() == []
     assert svc.state_store.load().is_enabled("breakout") is True
+
+
+def test_deny_rejects_an_already_approved_proposal(tmp_path):
+    """Regression guard: deny() used to have no status guard at all (unlike
+    approve(), and unlike the trade-proposal deny path in run_telegram.py's
+    _on_deny) -- a stale Telegram button tap could flip an already-approved
+    (and applied) proposal's audit record to "denied" after the fact,
+    corrupting the record without actually reverting anything."""
+    svc = service(tmp_path)
+    pid = svc.propose("disable", "breakout")["proposal_id"]
+    assert svc.approve(pid)["ok"]
+
+    result = svc.deny(pid)
+
+    assert result["ok"] is False
+    assert svc.proposal_store.get(pid).status == "approved"
+
+
+def test_custom_expiry_minutes_is_actually_used(tmp_path):
+    """RotationService.expiry_minutes (config-driven in production, see
+    scripts/run_telegram.py's settings.approval.recommendation_expiry_minutes)
+    must actually reach the proposal it creates, not just sit unused."""
+    from datetime import datetime, timedelta, timezone
+
+    svc = service(tmp_path, expiry_minutes=5)
+    pid = svc.propose("disable", "breakout")["proposal_id"]
+    prop = svc.proposal_store.get(pid)
+    now = datetime.now(timezone.utc)
+    assert not prop.is_expired(now + timedelta(minutes=4))
+    assert prop.is_expired(now + timedelta(minutes=6))
+
+
+def test_custom_max_weight_is_actually_enforced(tmp_path):
+    svc = service(tmp_path, max_weight=0.5)
+    result = svc.propose("reweight", "breakout", weight=0.75)
+    assert result["ok"] is False
+    assert "out of bounds" in result["error"]

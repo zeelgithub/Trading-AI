@@ -11,7 +11,7 @@ Boundary: declarative only; places orders NO.
 
 from __future__ import annotations
 
-from src.agents.profiles import DEFAULT_MODEL, AgentProfile
+from src.agents.profiles import DEFAULT_MODEL, STRONG_MODEL, AgentProfile
 
 _NL_ROUTER_PROMPT = """You translate ONE chat message from the owner of a personal \
 stock-trading bot into ONE structured command. Output ONLY a JSON object -- no prose, \
@@ -88,7 +88,7 @@ STRATEGY_ANALYST = AgentProfile(
     name="strategy_analyst",
     system_prompt=_STRATEGY_ANALYST_PROMPT,
     tool_names=("get_scoreboard", "get_positions", "propose_rotation"),
-    model="claude-sonnet-4-6",
+    model=STRONG_MODEL,
     max_steps=8,
     max_tokens=1024,
 )
@@ -126,7 +126,7 @@ ANOMALY_TRIAGE = AgentProfile(
     name="anomaly_triage",
     system_prompt=_ANOMALY_TRIAGE_PROMPT,
     tool_names=("get_halt_state", "get_recent_events"),
-    model="claude-sonnet-4-6",
+    model=STRONG_MODEL,
     max_steps=6,
     max_tokens=600,
 )

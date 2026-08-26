@@ -78,6 +78,7 @@ class TechnicalSource:
                     "verdict": verdict,
                     "regime": regime,
                     "confidence": float(intent.confidence),
+                    "side": intent.side.value,
                     "entry_price": intent.entry_price if intent.entry_price else float(last.close),
                     "stop_loss": intent.stop_loss,
                     "atr": safe_num(last, "atr"),

@@ -44,15 +44,22 @@ def add_cross_sectional_momentum(
     skip: int = 21,
     top_pct: float = 0.2,
 ) -> dict[str, pd.DataFrame]:
-    """Return a NEW dict (inputs untouched) where every frame gains two columns:
+    """Return a NEW dict (inputs untouched) where every frame gains four columns:
       - momentum_formation_return: trailing `lookback`-day return ending `skip`
         days ago, this symbol only (causal, no cross-symbol info yet).
       - momentum_top_bucket: True if this symbol's formation return is in the
         top `top_pct` of all symbols with a valid formation return on that date.
+      - momentum_bottom_bucket: True if it's in the BOTTOM `top_pct` instead --
+        the symmetric "loser" side of the same top_pct parameter (previously
+        src/strategy/momentum.py re-derived this itself as a hardcoded 0.2,
+        independent of the top_pct actually passed in here -- a real bug if
+        this function is ever called with a non-default top_pct, since only
+        the long side would follow it).
+      - momentum_percentile: 0-1 percentile rank, higher = stronger.
 
     Dates where fewer than 5 symbols have a valid formation return are left
-    with momentum_top_bucket=False everywhere (too small a cross-section to
-    rank meaningfully -- e.g. universe warmup at the very start of history).
+    with both buckets False everywhere (too small a cross-section to rank
+    meaningfully -- e.g. universe warmup at the very start of history).
     """
     formation: dict[str, pd.Series] = {}
     out: dict[str, pd.DataFrame] = {}
@@ -71,18 +78,22 @@ def add_cross_sectional_momentum(
     formation_matrix = pd.DataFrame({sym: s for sym, s in formation.items()}, index=all_dates)
 
     top_bucket_matrix = pd.DataFrame(False, index=all_dates, columns=formation_matrix.columns)
+    bottom_bucket_matrix = pd.DataFrame(False, index=all_dates, columns=formation_matrix.columns)
     for date in all_dates:
         row = formation_matrix.loc[date].dropna()
         if len(row) < 5:
             continue
-        cutoff = row.quantile(1.0 - top_pct)
+        top_cutoff = row.quantile(1.0 - top_pct)
         # Ties at the cutoff all included (>=), consistent with "top_pct of
         # the field", not an exact headcount -- matters only when few symbols
         # share an identical formation return, which is rare with real prices.
-        top_bucket_matrix.loc[date, row[row >= cutoff].index] = True
+        top_bucket_matrix.loc[date, row[row >= top_cutoff].index] = True
+        bottom_cutoff = row.quantile(top_pct)
+        bottom_bucket_matrix.loc[date, row[row <= bottom_cutoff].index] = True
 
     for symbol, frame in out.items():
         frame["momentum_top_bucket"] = top_bucket_matrix[symbol].reindex(frame.index, fill_value=False)
+        frame["momentum_bottom_bucket"] = bottom_bucket_matrix[symbol].reindex(frame.index, fill_value=False)
         # Percentile rank (0-1, higher = stronger) for confidence scaling --
         # NaN (not enough cross-section that date, or this symbol has no
         # formation return yet) becomes 0.0, i.e. "no evidence of strength".

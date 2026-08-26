@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 
 from src.common.errors import retry_transient
 from src.common.models import Side
-from src.execution.broker_alpaca import BrokerInterface
+from src.execution.broker_alpaca import BrokerInterface, is_stop_order
 from src.execution.order_manager import PositionStatus
 
 QTY_TOLERANCE = 1e-6
@@ -71,7 +71,7 @@ class Reconciler:
         broker_positions = {p.symbol: p for p in retry_transient(self.broker.list_positions)}
         open_orders = retry_transient(self.broker.list_open_orders)
         order_symbols = {o.symbol for o in open_orders}
-        stop_symbols = {o.symbol for o in open_orders if "stop" in o.type}
+        stop_symbols = {o.symbol for o in open_orders if is_stop_order(o.type)}
 
         report = ReconcileReport(ok=True)
         tracked: set[str] = set()

@@ -23,6 +23,7 @@ import time
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
+from src.common.errors import retry_transient
 from src.common.secrets import RedditCredentials, load_reddit_credentials
 
 _TOKEN_URL = "https://www.reddit.com/api/v1/access_token"
@@ -61,15 +62,21 @@ class RedditAppOnly:
             return self._token
         import requests
 
-        resp = requests.post(
-            _TOKEN_URL,
-            auth=(self._creds.client_id, self._creds.client_secret),
-            data={"grant_type": "client_credentials"},
-            headers={"User-Agent": self._creds.user_agent},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        data = resp.json()
+        def _fetch():
+            resp = requests.post(
+                _TOKEN_URL,
+                auth=(self._creds.client_id, self._creds.client_secret),
+                data={"grant_type": "client_credentials"},
+                headers={"User-Agent": self._creds.user_agent},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            return resp
+
+        # Read-only: retry a transient network blip instead of failing the
+        # whole discovery cycle over one dropped connection -- same pattern
+        # as alpaca_data.py's bar fetch.
+        data = retry_transient(_fetch).json()
         self._token = data["access_token"]
         self._token_expiry = time.time() + float(data.get("expires_in", 3600))
         return self._token
@@ -83,14 +90,18 @@ class RedditAppOnly:
                 "REDDIT_CLIENT_SECRET missing from .env)."
             )
         token = self._get_token()
-        resp = requests.get(
-            f"{_API_BASE}/r/{subreddit}/hot",
-            params={"limit": limit},
-            headers={"Authorization": f"Bearer {token}", "User-Agent": self._creds.user_agent},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        payload = resp.json()
+
+        def _fetch():
+            resp = requests.get(
+                f"{_API_BASE}/r/{subreddit}/hot",
+                params={"limit": limit},
+                headers={"Authorization": f"Bearer {token}", "User-Agent": self._creds.user_agent},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            return resp
+
+        payload = retry_transient(_fetch).json()
         out: list[RedditPost] = []
         for child in payload.get("data", {}).get("children", []):
             d = child.get("data", {})
